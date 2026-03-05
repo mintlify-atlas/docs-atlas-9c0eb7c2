@@ -64,6 +64,7 @@
           {
             "group": "Python API",
             "pages": [
+              "api/core",
               "api/sidecar",
               "api/aggregate",
               "api/accumulator",

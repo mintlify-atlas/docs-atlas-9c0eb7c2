@@ -1,0 +1,190 @@
+---
+title: "Core Utilities"
+description: "Core utility functions for HEALPix validation and robust statistics"
+---
+
+The `core` module provides essential utility functions used throughout HEALPyxel, including HEALPix parameter validation and robust statistical functions.
+
+## Functions
+
+### validate_nside()
+
+Validate that nside is a power of 2.
+
+```python
+from healpyxel.core import validate_nside
+
+validated = validate_nside(nside: int) -> int
+```
+
+<ParamField path="nside" type="int" required>
+  HEALPix resolution parameter
+</ParamField>
+
+<ResponseField name="return" type="int">
+  Validated nside value
+</ResponseField>
+
+**Raises:**
+- `ValueError` - If nside is not a power of 2
+
+**Example:**
+```python
+from healpyxel.core import validate_nside
+
+# Valid nside
+nside = validate_nside(64)  # Returns 64
+
+# Invalid nside raises error
+try:
+    validate_nside(100)
+except ValueError as e:
+    print(e)  # "nside must be a power of 2, got 100"
+```
+
+### mad()
+
+Compute Median Absolute Deviation (MAD), a robust measure of statistical dispersion.
+
+```python
+from healpyxel.core import mad
+import numpy as np
+
+mad_value = mad(arr: np.ndarray) -> float
+```
+
+<ParamField path="arr" type="np.ndarray" required>
+  Input array of numeric values
+</ParamField>
+
+<ResponseField name="return" type="float">
+  MAD value (median of absolute deviations from the median)
+</ResponseField>
+
+**Note:** 
+MAD is calculated as `median(|x - median(x)|)`. It automatically filters out non-finite values (NaN, inf).
+
+**Example:**
+```python
+import numpy as np
+from healpyxel.core import mad
+
+# Clean data
+data = np.array([1, 2, 3, 4, 5])
+print(mad(data))  # 1.0
+
+# Data with outlier - MAD is robust
+data_outlier = np.array([1, 2, 3, 4, 5, 100])
+print(mad(data_outlier))  # Still close to 1.0
+
+# Handles NaN values
+data_nan = np.array([1, 2, 3, np.nan, 5])
+print(mad(data_nan))  # Computes on finite values only
+```
+
+### robust_std()
+
+Compute robust standard deviation using MAD × 1.4826.
+
+```python
+from healpyxel.core import robust_std
+import numpy as np
+
+robust_std_value = robust_std(arr: np.ndarray) -> float
+```
+
+<ParamField path="arr" type="np.ndarray" required>
+  Input array of numeric values
+</ParamField>
+
+<ResponseField name="return" type="float">
+  Robust standard deviation
+</ResponseField>
+
+**Note:**
+The factor 1.4826 makes MAD consistent with standard deviation for normally distributed data. This makes `robust_std` directly comparable to `np.std` but more resistant to outliers.
+
+**Example:**
+```python
+import numpy as np
+from healpyxel.core import robust_std
+
+# Compare normal std vs robust std with outliers
+data = np.array([1, 2, 3, 4, 5, 100])  # 100 is an outlier
+
+normal_std = np.std(data)
+robust = robust_std(data)
+
+print(f"Normal std: {normal_std:.2f}")    # ~39 (heavily affected by outlier)
+print(f"Robust std: {robust:.2f}")        # ~1.48 (resistant to outlier)
+```
+
+<Tip>
+Use `robust_std` instead of `np.std` when your data may contain outliers or contamination. It provides a more reliable estimate of spread for planetary science datasets.
+</Tip>
+
+### setup_logger()
+
+Setup a logger with standard formatting for HEALPyxel operations.
+
+```python
+from healpyxel.core import setup_logger
+import logging
+
+logger = setup_logger(
+    name: str,
+    level: int = logging.INFO
+) -> logging.Logger
+```
+
+<ParamField path="name" type="str" required>
+  Logger name (typically module name)
+</ParamField>
+
+<ParamField path="level" type="int" default="logging.INFO">
+  Logging level (e.g., logging.DEBUG, logging.INFO, logging.WARNING)
+</ParamField>
+
+<ResponseField name="return" type="logging.Logger">
+  Configured logger instance
+</ResponseField>
+
+**Example:**
+```python
+from healpyxel.core import setup_logger
+import logging
+
+# Create logger
+logger = setup_logger("mymodule", level=logging.DEBUG)
+
+# Use logger
+logger.info("Processing started")
+logger.debug("Detailed debug information")
+logger.warning("Warning message")
+```
+
+## Usage in Aggregation Functions
+
+The robust statistics functions are used throughout HEALPyxel's aggregation pipeline:
+
+```python
+from healpyxel import aggregate
+from healpyxel.core import mad, robust_std
+
+# Aggregate with robust statistics
+agg_df = aggregate.by_sidecar(
+    original=df,
+    sidecar=sidecar_df,
+    value_columns=["reflectance"],
+    aggs=["median", "mad", "robust_std"],  # Uses core.mad and core.robust_std
+    min_count=3
+)
+
+# Result columns: reflectance_median, reflectance_mad, reflectance_robust_std
+```
+
+## See Also
+
+- [Aggregate API](/api/aggregate) - Uses robust statistics for aggregation
+- [Workflow Guide](/concepts/workflow) - Explains aggregation functions
+
