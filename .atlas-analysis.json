@@ -1,0 +1,102 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "HEALPyxel",
+  "projectDescription": "Efficient HEALPix-based spatial aggregation library for planetary science and geospatial data processing",
+  "theme": "palm",
+  "primaryColor": "#2E86AB",
+  "lightColor": "#A23B72",
+  "darkColor": "#F18F01",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/healpix",
+              "concepts/workflow",
+              "concepts/sidecar-pattern"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/batch-processing",
+              "guides/streaming",
+              "guides/visualization",
+              "guides/geospatial"
+            ]
+          },
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/quickstart",
+              "examples/accumulation",
+              "examples/visualization-workflow"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Python API",
+            "pages": [
+              "api/sidecar",
+              "api/aggregate",
+              "api/accumulator",
+              "api/finalize",
+              "api/geospatial",
+              "api/visualization"
+            ]
+          },
+          {
+            "group": "CLI Reference",
+            "pages": [
+              "cli/overview",
+              "cli/sidecar",
+              "cli/aggregate",
+              "cli/accumulator",
+              "cli/finalize",
+              "cli/to-geoparquet",
+              "cli/cache"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "HEALPix-based spatial gridding with equal-area cells",
+    "Split-Apply-Combine workflow for large-scale data processing",
+    "Sidecar pattern for non-destructive data indexing",
+    "Streaming accumulation for incremental data ingestion",
+    "GeoParquet integration for modern geospatial workflows",
+    "Robust statistics (MAD, robust_std) for outlier handling",
+    "Both Python API and CLI tools",
+    "Optimized for planetary science and sparse observation datasets"
+  ],
+  "publicApiSurface": [
+    "sidecar.generate()",
+    "aggregate.by_sidecar()",
+    "accumulator.update_state()",
+    "finalize.from_state()",
+    "geospatial.healpix_to_geodataframe()",
+    "healpyxel_sidecar",
+    "healpyxel_aggregate",
+    "healpyxel_accumulator",
+    "healpyxel_finalize",
+    "healpyxel_to_geoparquet",
+    "healpyxel_cache"
+  ]
+}
