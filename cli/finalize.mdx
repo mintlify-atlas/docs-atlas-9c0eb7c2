@@ -1,0 +1,358 @@
+---
+title: healpyxel_finalize
+description: Convert accumulator state to final HEALPix maps with statistics
+---
+
+The `healpyxel_finalize` command computes final statistics from accumulator state files, producing publication-ready HEALPix maps with mean, std, percentiles, and optional densification.
+
+## Overview
+
+Finalize converts streaming state (maintained by `healpyxel_accumulator`) into final statistical maps. It computes:
+
+- **Basic statistics:** mean, std, min, max from Welford accumulators
+- **Approximate percentiles:** from T-Digest (if available)
+- **Quality control:** minimum observation count thresholds
+- **Optional densification:** fill all HEALPix cells for uniform grids
+
+## Basic Usage
+
+```bash
+healpyxel_finalize \
+  --state state_v030.parquet \
+  --output month01_mosaic.parquet \
+  --percentiles 25 50 75 \
+  --min-count 5
+```
+
+## Required Arguments
+
+<ParamField path="--state" type="path" required>
+  Input state file from `healpyxel_accumulator`.
+  
+  **Example:**
+  ```bash
+  -s state/state_v030.parquet
+  ```
+</ParamField>
+
+<ParamField path="--output" type="path" required>
+  Output parquet file with final statistics.
+  
+  **Example:**
+  ```bash
+  -o products/month01_mosaic.parquet
+  ```
+</ParamField>
+
+## Statistics Options
+
+<ParamField path="--percentiles" type="float[]" default="25 50 75">
+  Percentiles to compute from T-Digest (if available).
+  
+  **Common values:**
+  - `25 50 75`: Quartiles (default)
+  - `10 50 90`: Deciles
+  - `5 25 50 75 95`: Extended range
+  
+  **Example:**
+  ```bash
+  --percentiles 10 25 50 75 90
+  ```
+</ParamField>
+
+<ParamField path="--min-count" type="int" default="1">
+  Minimum observations per cell. Cells below threshold output NaN.
+  
+  **Recommended values:**
+  - `1`: Include all cells with data (permissive)
+  - `5`: Moderate quality control
+  - `10+`: Strict validation
+  
+  **Example:**
+  ```bash
+  --min-count 10
+  ```
+</ParamField>
+
+<Note>
+**T-Digest requirement:** Percentile computation requires that the accumulator state was created with T-Digest enabled (default). If state was created with `--no-tdigest`, percentiles will be NaN.
+</Note>
+
+## Densification Options
+
+<ParamField path="--densify" type="flag">
+  Create full HEALPix grid by filling empty cells with NaN.
+  
+  **Trade-offs:**
+  - **Sparse** (default): Only observed cells, smaller files
+  - **Dense**: All 12×nside² cells, uniform grid for visualization
+  
+  **Example:**
+  ```bash
+  --densify
+  ```
+</ParamField>
+
+<ParamField path="--nside" type="int">
+  nside for densification. Auto-detected from state metadata if not specified.
+  
+  **Example:**
+  ```bash
+  --densify --nside 512
+  ```
+</ParamField>
+
+<Warning>
+**Auto-detection:** `--nside` is only required if state file is missing metadata. In most cases, omit this parameter and let the command infer nside automatically.
+</Warning>
+
+## Export Options
+
+<ParamField path="--export-tiff" type="string[2]">
+  Export a column to GeoTIFF format (requires rasterio).
+  
+  **Arguments:** COLUMN OUTPUT
+  
+  **Example:**
+  ```bash
+  --export-tiff r750_mean output_r750.tif
+  ```
+</ParamField>
+
+<ParamField path="--crs" type="string" default="IAU:19900">
+  CRS for GeoTIFF export.
+  
+  **Common values:**
+  - `IAU:19900`: Mercury IAU CRS (default)
+  - `IAU:49900`: Mars IAU CRS
+  - `IAU:30100`: Moon IAU CRS
+  - `EPSG:4326`: Earth WGS84
+  
+  **Example:**
+  ```bash
+  --export-tiff r750_median output.tif --crs IAU:49900
+  ```
+</ParamField>
+
+<Note>
+**GeoTIFF export** creates an equirectangular projection from HEALPix data at 0.25° resolution (1440×720 grid). This is a visualization export, not a scientifically accurate reprojection.
+
+For analysis, use the parquet output with HEALPix indexing.
+</Note>
+
+## Logging Options
+
+<ParamField path="--verbose" type="flag">
+  Enable verbose debug logging.
+  
+  **Example:**
+  ```bash
+  -v
+  ```
+</ParamField>
+
+<ParamField path="--quiet" type="flag">
+  Suppress progress bars and non-critical messages.
+  
+  **Example:**
+  ```bash
+  -q
+  ```
+</ParamField>
+
+## Output Files
+
+### Finalized Parquet File
+
+```
+{output_path}.parquet
+```
+
+**Index:** `healpix_id`
+
+**Columns:**
+- `{column}_n`: Observation count
+- `{column}_mean`: Mean value
+- `{column}_std`: Standard deviation
+- `{column}_min`: Minimum value
+- `{column}_max`: Maximum value
+- `{column}_p{N}`: Nth percentile (if T-Digest available)
+
+**Example columns for `--columns r750 r950 --percentiles 25 50 75`:**
+```
+healpix_id, r750_n, r750_mean, r750_std, r750_min, r750_max, 
+r750_p25, r750_p50, r750_p75, r950_n, r950_mean, ...
+```
+
+### Metadata JSON File
+
+```
+{output_path}.meta.json
+```
+
+**Contains:**
+- Processing stage (finalize), timestamp
+- HEALPix parameters (nside, mode, order)
+- Statistics configuration (percentiles, min_count, densified)
+- Source state file reference
+
+## Examples
+
+### Basic Finalization
+
+```bash
+healpyxel_finalize \
+  --state state_v030.parquet \
+  --output month01_mosaic.parquet
+```
+
+**Output:**
+- `month01_mosaic.parquet`: Sparse map with default percentiles (25, 50, 75)
+- `month01_mosaic.meta.json`: Processing metadata
+
+### With Custom Percentiles and Quality Control
+
+```bash
+healpyxel_finalize \
+  --state state_v030.parquet \
+  --output month01_mosaic.parquet \
+  --percentiles 10 25 50 75 90 \
+  --min-count 10
+```
+
+### Densify to Full Grid
+
+```bash
+healpyxel_finalize \
+  --state state_v030.parquet \
+  --output month01_dense.parquet \
+  --densify \
+  --nside 512
+```
+
+### Export to GeoTIFF
+
+```bash
+healpyxel_finalize \
+  --state state_v030.parquet \
+  --output month01_mosaic.parquet \
+  --export-tiff r750_mean r750_mean.tif \
+  --crs IAU:19900
+```
+
+**Output:**
+- `month01_mosaic.parquet`: Parquet with statistics
+- `r750_mean.tif`: GeoTIFF raster (1440×720 pixels)
+
+### Complete Workflow Example
+
+```bash
+# Step 1: Accumulate 30 days of data
+for i in {001..030}; do
+  prev=$((i - 1))
+  healpyxel_accumulator \
+    --input observations_day${i}.parquet \
+    --nside 512 --mode fuzzy \
+    --columns r750 r950 \
+    --state-input state/state_v$(printf "%03d" $prev).parquet \
+    --state-output state/state_v${i}.parquet
+done
+
+# Step 2: Finalize with quality control
+healpyxel_finalize \
+  --state state/state_v030.parquet \
+  --output products/month01_mosaic.parquet \
+  --percentiles 25 50 75 \
+  --min-count 5 \
+  --densify
+
+# Step 3: Convert to GeoParquet for QGIS
+healpyxel_to_geoparquet \
+  --aggregate-path products/month01_mosaic.parquet \
+  --output-dir products/
+```
+
+## Output Statistics
+
+The finalized parquet includes coverage statistics in the console:
+
+```
+Finalizing statistics for 3,145,728 cells
+Minimum observation count: 5
+✓ Finalized 2,847,392 cells
+  Columns: ['healpix_id', 'r750_n', 'r750_mean', 'r750_std', ...]
+  r750: 2,450,123 valid cells, 145,234,567 total observations
+  r950: 2,445,890 valid cells, 144,987,432 total observations
+```
+
+## Performance Considerations
+
+<Tip>
+**Processing time scales with:**
+- Number of cells in state (not observation count)
+- Number of percentiles requested
+- Densification (adds all empty cells)
+
+For nside=512 (3M cells):
+- Sparse finalization: ~30 seconds
+- Dense finalization: ~2 minutes
+- GeoTIFF export: +30 seconds
+</Tip>
+
+<Tip>
+**Memory usage:**
+
+Peak memory is dominated by:
+1. Loading full state file (~1-20 GB)
+2. Densification (adds empty cells)
+3. GeoTIFF grid (minimal, ~10 MB)
+
+Recommend 32 GB RAM for nside=512 with densification.
+</Tip>
+
+## Troubleshooting
+
+### Error: "State file missing HEALPix metadata"
+
+**Cause:** Old accumulator state without embedded metadata.
+
+**Solution:** Specify nside explicitly:
+```bash
+--nside 512
+```
+
+### Warning: "T-Digest data not found in state, percentiles will be NaN"
+
+**Cause:** Accumulator was run with `--no-tdigest`.
+
+**Impact:** Percentile columns exist but contain NaN.
+
+**Solution:** Rerun accumulator without `--no-tdigest`, or omit `--percentiles` flag.
+
+### Error: "Column {column} not found in output"
+
+**Cause:** Specified `--export-tiff` column doesn't exist.
+
+**Solution:** Check available columns:
+```bash
+import pandas as pd
+df = pd.read_parquet("month01_mosaic.parquet")
+print(df.columns)
+```
+
+### Error: "healpy required for densification"
+
+**Cause:** healpy not installed.
+
+**Solution:**
+```bash
+pip install healpy
+# or
+conda install -c conda-forge healpy
+```
+
+## See Also
+
+- [healpyxel_accumulator](/cli/accumulator) - Previous step: accumulate batches
+- [healpyxel_to_geoparquet](/cli/to-geoparquet) - Add geometry for visualization
+- [CLI Overview](/cli/overview) - Complete workflow documentation

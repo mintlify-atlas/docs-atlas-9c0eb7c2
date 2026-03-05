@@ -1,0 +1,120 @@
+---
+title: 'HEALPix Grid System'
+description: 'Understanding HEALPix: hierarchical equal-area tessellation for planetary science'
+---
+
+## What is HEALPix?
+
+**HEALPix** (Hierarchical Equal Area isoLatitude Pixelization) is a standard for partitioning a sphere (like a planet or the sky) into pixels of equal surface area.
+
+Unlike traditional "rectangular" map projections (like Equirectangular or Mercator), HEALPix ensures that:
+
+<CardGroup cols={3}>
+  <Card title="Equal Area" icon="grid-2">
+    Every pixel is the same size, ensuring statistical analysis remains valid across the entire globe, including the poles.
+  </Card>
+  <Card title="Hierarchical" icon="sitemap">
+    You can easily increase or decrease resolution (nside) while maintaining spatial relationships.
+  </Card>
+  <Card title="Fast Computation" icon="bolt">
+    Efficient neighbor searches and spherical harmonic transforms.
+  </Card>
+</CardGroup>
+
+## The Problem: Data Distortion & Scale
+
+In planetary science, data often arrives as **scattered points, tracks, or footprints** from spectrometers and altimeters. Traditionally, researchers face two major hurdles:
+
+<Note>
+  **Projection Bias:** Standard grids distort the poles, making global surface calculations (like mean chemical abundance or crater density) mathematically biased.
+</Note>
+
+<Note>
+  **The Memory Wall:** Modern missions generate billions of points. Loading an entire global high-resolution map into RAM to update it is often impossible.
+</Note>
+
+HEALPyxel solves this by treating the sphere as a **modern data engineering target** rather than just a geometric grid.
+
+## Understanding nside Values
+
+The `nside` parameter controls HEALPix resolution. It must be a **power of 2** (1, 2, 4, 8, 16, 32, 64, 128, ...).
+
+```python
+from healpyxel.core import validate_nside
+
+# Valid nside values
+nside = 64  # ✓ Valid (power of 2)
+nside = 128 # ✓ Valid
+
+# Invalid nside
+nside = 100 # ✗ Invalid (not power of 2)
+# Raises: ValueError: nside must be a power of 2
+```
+
+### Number of Cells
+
+The total number of HEALPix cells for a given nside is:
+
+```
+N_pixels = 12 × nside²
+```
+
+**Examples:**
+- nside=32 → 12,288 cells
+- nside=64 → 49,152 cells
+- nside=128 → 196,608 cells
+
+## Cell Sizes for Planetary Bodies
+
+The following table shows cell angular size and physical size for Mercury, Moon, and Venus at different nside values:
+
+<Tip>
+  Choose nside based on your instrument's footprint size. For example, if your spectrometer has a ~40 km footprint on Mercury, use nside=64.
+</Tip>
+
+| nside | Number of Cells | Angular Size (deg) | Mercury (km) | Moon (km) | Venus (km) |
+|-------|-----------------|--------------------|--------------|-----------|-----------|
+| 1     | 12              | 58.632            | 2496.610     | 1777.928  | 6192.969  |
+| 2     | 48              | 29.316            | 1248.305     | 888.964   | 3096.484  |
+| 4     | 192             | 14.658            | 624.153      | 444.482   | 1548.242  |
+| 8     | 768             | 7.329             | 312.076      | 222.241   | 774.121   |
+| 16    | 3,072           | 3.665             | 156.038      | 111.120   | 387.061   |
+| 32    | 12,288          | 1.832             | 78.019       | 55.560    | 193.530   |
+| 64    | 49,152          | 0.916             | 39.010       | 27.780    | 96.765    |
+| 128   | 196,608         | 0.458             | 19.505       | 13.890    | 48.383    |
+| 256   | 786,432         | 0.229             | 9.752        | 6.945     | 24.191    |
+| 512   | 3,145,728       | 0.115             | 4.876        | 3.473     | 12.096    |
+| 1,024 | 12,582,912      | 0.057             | 2.438        | 1.736     | 6.048     |
+| 2,048 | 50,331,648      | 0.029             | 1.219        | 0.868     | 3.024     |
+| 4,096 | 201,326,592     | 0.014             | 0.610        | 0.434     | 1.512     |
+| 8,192 | 805,306,368     | 0.007             | 0.305        | 0.217     | 0.756     |
+
+## Nested vs Ring Ordering
+
+HEALPix supports two cell ordering schemes:
+
+- **Nested** (default in HEALPyxel): Nearby cells have nearby indices, enabling efficient spatial queries
+- **Ring**: Cells ordered by latitude rings, useful for spherical harmonics
+
+HEALPyxel uses **nested ordering** by default for optimal spatial locality.
+
+```python
+from healpyxel.sidecar import compute_healpix_ids_from_lonlat
+import numpy as np
+
+# Compute HEALPix cell IDs from coordinates
+lons = np.array([0.0, 45.0, 90.0])
+lats = np.array([0.0, 30.0, -30.0])
+nside = 64
+
+# Returns nested order indices by default
+healpix_ids = compute_healpix_ids_from_lonlat(nside, lons, lats)
+print(healpix_ids)  # e.g., [16384, 18234, 20156]
+```
+
+## Resources
+
+- [HEALPix Official Website](https://healpix.sourceforge.io/)
+- [HEALPix - Wikipedia](https://en.wikipedia.org/wiki/HEALPix)
+- [healpy Documentation](https://healpy.readthedocs.io/)
+- [Awesome HEALPix](https://github.com/pangeo-data/awesome-HEALPix) - Curated list of HEALPix tools and resources

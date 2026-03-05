@@ -1,0 +1,321 @@
+---
+title: 'Visualization Workflow'
+description: 'Complete workflow from sidecar creation to advanced HEALPix map rendering'
+icon: 'chart-area'
+---
+
+This example demonstrates the complete workflow for creating and visualizing HEALPix-based maps from geospatial data.
+
+## Overview
+
+Learn how to:
+
+1. Load geospatial data with WKB geometries
+2. Create HEALPix sidecar assignments
+3. Aggregate data by HEALPix cells
+4. Densify maps to fill gaps
+5. Enrich with cell geometries for visualization
+6. Render maps with healpy
+
+## Setup
+
+```python
+import healpyxel
+from healpyxel import core
+import pandas as pd
+import numpy as np
+import geopandas as gpd
+from shapely import wkb
+from pathlib import Path
+import matplotlib.pyplot as plt
+```
+
+## Load Test Data with Geometries
+
+```python
+test_data_dir = Path('../test_data')
+sample_file = test_data_dir / 'samples/sample_50k.parquet'
+
+print(f"Loading: {sample_file}")
+
+# Read as pandas DataFrame (geometry is WKB binary)
+df = pd.read_parquet(sample_file)
+print(f"Loaded {len(df)} rows")
+
+# Convert WKB geometry to shapely geometries
+if 'geometry' in df.columns:
+    print("\nConverting WKB geometry to GeoDataFrame...")
+    df['geometry'] = df['geometry'].apply(
+        lambda x: wkb.loads(bytes(x)) if x is not None else None
+    )
+    gdf = gpd.GeoDataFrame(df, geometry='geometry', crs='EPSG:4326')
+    print(f"CRS: {gdf.crs}")
+else:
+    print("\nNo geometry column found!")
+    gdf = df
+
+# Show sample
+gdf.head(3).iloc[:,-10:]
+```
+
+## Inspect Data Coverage
+
+```python
+import duckdb
+
+stats = []
+for parquet_file in test_data_dir.rglob('*.parquet'):
+    size_mb = parquet_file.stat().st_size / 1024 / 1024
+    rel = parquet_file.relative_to(test_data_dir)
+    
+    try:
+        q = (
+            f"SELECT COUNT(*) AS n_rows, "
+            f"MIN(lat_center) AS lat_min, MAX(lat_center) AS lat_max, "
+            f"MIN(lon_center) AS lon_min, MAX(lon_center) AS lon_max "
+            f"FROM read_parquet('{parquet_file.as_posix()}')"
+        )
+        n_rows, lat_min, lat_max, lon_min, lon_max = duckdb.query(q).fetchone()
+    except Exception:
+        n_rows = duckdb.query(
+            f"SELECT COUNT(*) FROM read_parquet('{parquet_file.as_posix()}')"
+        ).fetchone()[0]
+        lat_min = lat_max = lon_min = lon_max = None
+
+    stats.append({
+        "file": str(rel),
+        "size_mb": size_mb,
+        "n_rows": n_rows,
+        "lat_min": lat_min,
+        "lat_max": lat_max,
+        "lon_min": lon_min,
+        "lon_max": lon_max,
+    })
+
+df_stats = pd.DataFrame(stats)
+display(df_stats)
+```
+
+### Geospatial Coverage Map
+
+```python
+from shapely.geometry import box
+
+df_stats['geometry'] = df_stats.apply(
+    lambda row: box(row['lon_min'], row['lat_min'], row['lon_max'], row['lat_max'])
+    if not pd.isna(row['lat_min']) else None,
+    axis=1
+)
+gdf_stats = gpd.GeoDataFrame(df_stats, geometry='geometry', crs='EPSG:4326')
+
+ax = gdf_stats.plot(column='filename', legend=False, figsize=(10, 6))
+ax.set_title("Geospatial Summary of Parquet Files")
+ax.set_xlabel("Longitude")
+ax.set_ylabel("Latitude")
+plt.show()
+```
+
+## Create HEALPix Sidecar
+
+```python
+from healpyxel.sidecar import process_partition
+
+# Parameters
+nside = 32
+mode = 'fuzzy'
+
+# Process GeoDataFrame
+sidecar_df = process_partition(
+    gdf=gdf,
+    nside=nside,
+    mode=mode,
+    base_index=0,
+    lon_convention='0_360'
+)
+
+print(f"Created sidecar with {len(sidecar_df)} assignments")
+print(f"Unique geometries: {sidecar_df['source_id'].nunique()}")
+print(f"Unique HEALPix cells: {sidecar_df['healpix_id'].nunique()}")
+print(f"\nSidecar columns: {list(sidecar_df.columns)}")
+
+# Show first few assignments
+sidecar_df.head(10)
+```
+
+### Assignment Distribution
+
+```python
+assignments_per_geom = sidecar_df.groupby('source_id').size()
+
+print(f"Assignment statistics:")
+print(f"  Min cells per geometry: {assignments_per_geom.min()}")
+print(f"  Max cells per geometry: {assignments_per_geom.max()}")
+print(f"  Mean cells per geometry: {assignments_per_geom.mean():.2f}")
+
+print(f"\nDistribution:")
+print(assignments_per_geom.value_counts().sort_index().head(10))
+```
+
+## Aggregate by HEALPix Cells
+
+```python
+from healpyxel.aggregate import aggregate_by_sidecar
+
+# Convert to regular DataFrame (drop geometry)
+df_for_agg = gdf.drop(columns=['geometry'])
+df_for_agg['source_id'] = df_for_agg.index.astype(np.int64)
+
+# Aggregate r1050 column
+aggregated = aggregate_by_sidecar(
+    original=df_for_agg,
+    sidecar=sidecar_df,
+    value_columns=['r1050'],
+    aggs=['mean', 'median', 'std', 'mad', 'robust_std'],
+    source_id_col='source_id',
+    healpix_col='healpix_id',
+    min_count=1,
+    sentinel_threshold=1e30
+)
+
+print(f"Aggregated {len(aggregated)} HEALPix cells")
+print(f"Columns: {list(aggregated.columns)}")
+aggregated.head(10)
+```
+
+## Enrich with Cell Geometries
+
+<Steps>
+  <Step title="Extract cell IDs from aggregated data">
+    ```python
+    from healpyxel.geospatial import healpix_to_geodataframe
+
+    cell_ids_in_aggregated = aggregated.index.unique()
+    print(f"Found {len(cell_ids_in_aggregated)} unique cells")
+    ```
+  </Step>
+  
+  <Step title="Fetch cell geometries from HEALPix grid">
+    ```python
+    gdf_cells = healpix_to_geodataframe(
+        nside=nside,
+        order='nested',
+        lon_convention='0_360',
+        pixels=np.array(cell_ids_in_aggregated, dtype=np.int64),
+        fix_antimeridian=True,
+        cache_mode='use'
+    ).reset_index(drop=False)
+
+    print(f"Retrieved {len(gdf_cells)} cell geometries")
+    print(f"Columns: {list(gdf_cells.columns)}")
+    ```
+  </Step>
+  
+  <Step title="Merge aggregated statistics with geometries">
+    ```python
+    aggregated_with_geoms = aggregated.reset_index(drop=False).merge(
+        gdf_cells[['healpix_id', 'geometry']],
+        on='healpix_id',
+        how='left'
+    )
+
+    aggregated_gdf = gpd.GeoDataFrame(
+        aggregated_with_geoms,
+        geometry='geometry',
+        crs='EPSG:4326'
+    )
+
+    print(f"\nEnriched GeoDataFrame:")
+    print(f"  Shape: {aggregated_gdf.shape}")
+    print(f"  Geometry type: {aggregated_gdf.geometry.type.unique()}")
+    print(f"  CRS: {aggregated_gdf.crs}")
+    ```
+  </Step>
+</Steps>
+
+## Visualize Results
+
+### Plot Aggregated Map
+
+```python
+fig, ax = plt.subplots(figsize=(15, 6))
+aggregated_gdf.plot(
+    ax=ax,
+    column='r1050_mean',
+    cmap='viridis',
+    legend=True,
+    legend_kwds={'label': 'r1050 Mean Reflectance'}
+)
+ax.set_title('HEALPix Aggregated Map (nside=32, r1050 mean)')
+ax.set_xlabel('Longitude')
+ax.set_ylabel('Latitude')
+plt.tight_layout()
+plt.show()
+```
+
+### HEALPix Mollweide Projection
+
+```python
+import healpy as hp
+
+npix = hp.nside2npix(nside)
+healpix_map = np.full(npix, hp.UNSEEN, dtype=np.float64)
+
+# Populate map
+healpix_ids = aggregated.index.values.astype(int)
+means = aggregated['r1050_mean'].values
+healpix_map[healpix_ids] = means
+
+# Render
+hp.mollview(
+    healpix_map,
+    title=f"HEALPix Map (nside={nside})",
+    unit="r1050 Mean",
+    cmap='viridis'
+)
+plt.show()
+```
+
+### Statistical Summary
+
+```python
+print("\n" + "="*60)
+print("AGGREGATION SUMMARY")
+print("="*60)
+
+for col in ['r1050']:
+    print(f"\n{col}:")
+    print(f"  Cells with data: {aggregated[f'{col}_mean'].notna().sum()}")
+    print(f"  Mean:   {aggregated[f'{col}_mean'].mean():.6f}")
+    print(f"  Median: {aggregated[f'{col}_median'].median():.6f}")
+    print(f"  Std:    {aggregated[f'{col}_std'].mean():.6f}")
+    print(f"  Min:    {aggregated[f'{col}_mean'].min():.6f}")
+    print(f"  Max:    {aggregated[f'{col}_mean'].max():.6f}")
+```
+
+## Summary
+
+This workflow covered:
+
+1. **Data Loading** - WKB geometry conversion to GeoDataFrame
+2. **Sidecar Creation** - HEALPix cell assignments with fuzzy mode
+3. **Aggregation** - Statistical summaries per HEALPix cell
+4. **Enrichment** - Adding cell geometries for visualization
+5. **Visualization** - Both cartographic and HEALPix projections
+
+<CardGroup cols={2}>
+  <Card title="Densification" icon="grid" href="/api/aggregate">
+    Fill gaps in sparse HEALPix maps
+  </Card>
+  
+  <Card title="Advanced Projections" icon="globe" href="/guides/visualization">
+    Explore orthographic, gnomonic, and custom projections
+  </Card>
+  
+  <Card title="Finalize Module" icon="check" href="/api/finalize">
+    Create production-ready map products
+  </Card>
+  
+  <Card title="Streaming Accumulation" icon="stream" href="/examples/accumulation">
+    Handle datasets larger than memory
+  </Card>
+</CardGroup>

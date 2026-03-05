@@ -1,0 +1,484 @@
+---
+title: "Geospatial API"
+description: "Convert HEALPix data to geospatial formats (GeoDataFrame, GeoParquet, GeoTIFF)"
+---
+
+## Overview
+
+The geospatial module provides functions to convert HEALPix data to standard geospatial formats, with built-in caching and XDG Base Directory support.
+
+## Core Functions
+
+### healpix_to_geodataframe
+
+Create a GeoDataFrame of HEALPix cell polygons.
+
+```python
+def healpix_to_geodataframe(
+    nside: int,
+    order: str = 'nested',
+    lon_convention: str = '0_360',
+    pixels: Optional[Iterable[int]] = None,
+    fix_antimeridian: bool = True,
+    chunk_size: int = 65536,
+    cache_mode: str = 'use',
+    cache_dir: Optional[Path] = None
+) -> gpd.GeoDataFrame
+```
+
+<ParamField path="nside" type="int" required>
+  HEALPix nside parameter
+</ParamField>
+
+<ParamField path="order" type="str" default="'nested'">
+  HEALPix ordering: `'nested'` or `'ring'`
+</ParamField>
+
+<ParamField path="lon_convention" type="str" default="'0_360'">
+  Longitude convention: `'0_360'` or `'-180_180'` (affects polygon coordinates)
+</ParamField>
+
+<ParamField path="pixels" type="Iterable[int]" default="None">
+  Optional iterable of pixel indices; default = all pixels
+</ParamField>
+
+<ParamField path="fix_antimeridian" type="bool" default="True">
+  Whether to call `antimeridian.fix_polygon` on polygons crossing the meridian
+</ParamField>
+
+<ParamField path="chunk_size" type="int" default="65536">
+  Number of pixels to process per chunk for memory control
+</ParamField>
+
+<ParamField path="cache_mode" type="str" default="'use'">
+  Cache behavior: `'use'` (load cache if available, otherwise compute), `'require'` (require cache, error if missing), or `'off'` (ignore cache)
+</ParamField>
+
+<ParamField path="cache_dir" type="Path" default="None">
+  Optional cache directory override
+</ParamField>
+
+<ResponseField name="return" type="gpd.GeoDataFrame">
+  GeoDataFrame with columns: `healpix_id` (index) and `geometry` (EPSG:4326)
+</ResponseField>
+
+**Example:**
+```python
+from healpyxel.geospatial import healpix_to_geodataframe
+
+# Full grid
+gdf = healpix_to_geodataframe(
+    nside=64,
+    order='nested',
+    lon_convention='0_360',
+    fix_antimeridian=True
+)
+
+print(f"Cells: {len(gdf)}")
+print(f"CRS: {gdf.crs}")
+print(gdf.head())
+
+# Subset of pixels
+specific_cells = [100, 200, 300, 400, 500]
+gdf_subset = healpix_to_geodataframe(
+    nside=128,
+    pixels=specific_cells,
+    cache_mode='use'
+)
+```
+
+---
+
+### save_healpix_to_geoparquet
+
+Build HEALPix vector layer and save as GeoParquet.
+
+```python
+def save_healpix_to_geoparquet(
+    nside: int,
+    output_path: Union[str, Path],
+    order: str = 'nested',
+    lon_convention: str = '0_360',
+    fix_antimeridian: bool = True,
+    chunk_size: int = 65536,
+    parquet_kwargs: Optional[dict] = None,
+    overwrite: bool = False,
+    interactive: bool = True
+) -> Path
+```
+
+<ParamField path="nside" type="int" required>
+  HEALPix nside parameter
+</ParamField>
+
+<ParamField path="output_path" type="Union[str, Path]" required>
+  Path to output GeoParquet file
+</ParamField>
+
+<ParamField path="order" type="str" default="'nested'">
+  HEALPix ordering: `'nested'` or `'ring'`
+</ParamField>
+
+<ParamField path="lon_convention" type="str" default="'0_360'">
+  Longitude convention: `'0_360'` or `'-180_180'`
+</ParamField>
+
+<ParamField path="fix_antimeridian" type="bool" default="True">
+  Whether to fix antimeridian-wrapping
+</ParamField>
+
+<ParamField path="chunk_size" type="int" default="65536">
+  Pixels per chunk when building geometries
+</ParamField>
+
+<ParamField path="parquet_kwargs" type="dict" default="None">
+  Additional kwargs forwarded to `GeoDataFrame.to_parquet`
+</ParamField>
+
+<ParamField path="overwrite" type="bool" default="False">
+  Whether to overwrite the file if it exists
+</ParamField>
+
+<ParamField path="interactive" type="bool" default="True">
+  If True, prompt the user for confirmation before overwriting
+</ParamField>
+
+<ResponseField name="return" type="Path">
+  Path to the written file
+</ResponseField>
+
+**Raises:**
+- `FileExistsError`: If the file exists and overwrite is False
+
+**Example:**
+```python
+from pathlib import Path
+from healpyxel.geospatial import save_healpix_to_geoparquet
+
+output = save_healpix_to_geoparquet(
+    nside=128,
+    output_path=Path('healpix_grid_nside128.parquet'),
+    lon_convention='0_360',
+    overwrite=True
+)
+
+print(f"✓ Wrote GeoParquet: {output}")
+```
+
+---
+
+### export_healpix_to_geotiff
+
+Export a HEALPix column to GeoTIFF (requires rasterio + healpy).
+
+```python
+def export_healpix_to_geotiff(
+    df: pd.DataFrame,
+    column: str,
+    output_path: Union[str, Path],
+    nside: int,
+    order: str = 'nested',
+    crs: str = 'IAU:19900',
+    width: int = 1440,
+    height: int = 720
+) -> Path
+```
+
+<ParamField path="df" type="pd.DataFrame" required>
+  DataFrame with healpix_id index or healpix_id column
+</ParamField>
+
+<ParamField path="column" type="str" required>
+  Data column to export
+</ParamField>
+
+<ParamField path="output_path" type="Union[str, Path]" required>
+  GeoTIFF output path
+</ParamField>
+
+<ParamField path="nside" type="int" required>
+  HEALPix nside parameter
+</ParamField>
+
+<ParamField path="order" type="str" default="'nested'">
+  HEALPix ordering: `'nested'` or `'ring'`
+</ParamField>
+
+<ParamField path="crs" type="str" default="'IAU:19900'">
+  CRS string for GeoTIFF (default: Mercury IAU CRS)
+</ParamField>
+
+<ParamField path="width" type="int" default="1440">
+  Output raster width in pixels
+</ParamField>
+
+<ParamField path="height" type="int" default="720">
+  Output raster height in pixels
+</ParamField>
+
+<ResponseField name="return" type="Path">
+  Path to written GeoTIFF
+</ResponseField>
+
+**Example:**
+```python
+import pandas as pd
+from pathlib import Path
+from healpyxel.geospatial import export_healpix_to_geotiff
+
+# Load aggregated data
+df = pd.read_parquet('month01_aggregated.parquet')
+
+# Export mean reflectance
+export_healpix_to_geotiff(
+    df=df,
+    column='r750_mean',
+    output_path=Path('r750_mean.tif'),
+    nside=256,
+    crs='IAU:19900',  # Mercury
+    width=1440,
+    height=720
+)
+
+print("✓ Exported GeoTIFF")
+```
+
+---
+
+## Cache Management
+
+### manage_healpix_cache
+
+Core cache management logic with precedence awareness.
+
+```python
+def manage_healpix_cache(
+    action: str = 'list',
+    nsides: Optional[List[int]] = None,
+    cache_dir: Optional[Path] = None,
+    config_dir: Optional[Path] = None,
+    force: bool = False
+) -> dict
+```
+
+<ParamField path="action" type="str" required>
+  Action to perform: `'list'`, `'generate'`, `'verify'`, `'clean'`, `'info'`, or `'config'`
+</ParamField>
+
+<ParamField path="nsides" type="List[int]" default="None">
+  List of nside values for `'generate'` or `'verify'` actions
+</ParamField>
+
+<ParamField path="cache_dir" type="Path" default="None">
+  Explicit CLI override (highest precedence)
+</ParamField>
+
+<ParamField path="config_dir" type="Path" default="None">
+  Explicit CLI override (highest precedence)
+</ParamField>
+
+<ParamField path="force" type="bool" default="False">
+  Whether to overwrite existing cache files during `'generate'`
+</ParamField>
+
+<ResponseField name="return" type="dict">
+  Dict with keys: `action`, `cache_dir`, `config_dir`, `status`, and action-specific data
+</ResponseField>
+
+**Actions:**
+
+1. **list**: List all cached HEALPix grids
+2. **generate**: Generate cache files for specified nsides
+3. **verify**: Verify cache completeness and integrity
+4. **clean**: Remove all cached HEALPix grid files
+5. **info**: Show cache directory statistics
+6. **config**: Show current configuration and precedence resolution
+
+**Example:**
+```python
+from healpyxel.geospatial import manage_healpix_cache
+
+# List cached grids
+result = manage_healpix_cache(action='list')
+for file_info in result['files']:
+    print(f"{file_info['filename']}: {file_info['cells']} cells, {file_info['size_mb']:.2f} MB")
+
+# Generate cache for specific nsides
+result = manage_healpix_cache(
+    action='generate',
+    nsides=[64, 128, 256],
+    force=True
+)
+
+for gen_info in result['generated']:
+    print(f"nside {gen_info['nside']}: {gen_info['status']}")
+
+# Verify cache integrity
+result = manage_healpix_cache(
+    action='verify',
+    nsides=[64, 128]
+)
+
+for verify_info in result['verified']:
+    if verify_info['status'] == 'ok':
+        print(f"✓ nside {verify_info['nside']}: OK")
+    else:
+        print(f"❌ nside {verify_info['nside']}: {verify_info['error']}")
+```
+
+---
+
+### init_user_config
+
+Create default `~/.config/healpyxel/settings.ini` if it doesn't exist.
+
+```python
+def init_user_config(
+    config_dir: Optional[Path] = None
+) -> Path
+```
+
+<ParamField path="config_dir" type="Path" default="None">
+  Optional override for config directory
+</ParamField>
+
+<ResponseField name="return" type="Path">
+  Path to config file (whether newly created or already existed)
+</ResponseField>
+
+**Example:**
+```python
+from healpyxel.geospatial import init_user_config
+
+config_file = init_user_config()
+print(f"Config file: {config_file}")
+print(config_file.read_text())
+```
+
+---
+
+## Validation Functions
+
+### is_geometry_valid
+
+Check if a geometry is valid for use in a spherical projection.
+
+```python
+def is_geometry_valid(geom: BaseGeometry) -> bool
+```
+
+<ParamField path="geom" type="BaseGeometry" required>
+  A Shapely geometry object to validate
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  True if the geometry is valid for spherical projection, False otherwise
+</ResponseField>
+
+**Validation Checks:**
+- Latitude within [-90, 90]
+- Longitude within [-180, 360]
+- Geometry is not empty
+
+**Example:**
+```python
+from shapely.geometry import Polygon
+from healpyxel.geospatial import is_geometry_valid
+
+# Valid geometry
+geom1 = Polygon([(-180, -90), (-180, 90), (180, 90), (180, -90), (-180, -90)])
+print(is_geometry_valid(geom1))  # True
+
+# Invalid geometry (extreme coordinates)
+geom2 = Polygon([(1e32, 1e32), (180, 90), (180, -90), (1e32, 1e32)])
+print(is_geometry_valid(geom2))  # False
+```
+
+---
+
+## Internal Functions
+
+### _get_cache_dir
+
+Resolve HEALPix cache directory with full precedence.
+
+**Precedence (highest to lowest):**
+1. `cli_arg` — CLI --cache-dir argument (explicit user override)
+2. `env_override` — HEALPYXEL_CACHE env var (session preference)
+3. `XDG_CACHE_HOME` — $XDG_CACHE_HOME/healpyxel/healpix_grids
+4. XDG fallback — $HOME/.cache/healpyxel/healpix_grids
+
+```python
+def _get_cache_dir(
+    cli_arg: Optional[Union[str, Path]] = None,
+    env_override: Optional[str] = None
+) -> Path
+```
+
+---
+
+### _get_config_dir
+
+Resolve HEALPix config directory with full precedence.
+
+**Precedence (highest to lowest):**
+1. `cli_arg` — CLI --config-dir argument
+2. `env_override` — HEALPYXEL_CONFIG env var
+3. `XDG_CONFIG_HOME` — $XDG_CONFIG_HOME/healpyxel
+4. XDG fallback — $HOME/.config/healpyxel
+
+```python
+def _get_config_dir(
+    cli_arg: Optional[Union[str, Path]] = None,
+    env_override: Optional[str] = None
+) -> Path
+```
+
+---
+
+## CLI Entry Point
+
+### main
+
+Main entry point for geospatial commands.
+
+**Command-line Usage:**
+
+```bash
+# Generate full HEALPix grid as GeoParquet
+healpyxel_geospatial generate-grid \
+  --nside 128 \
+  --output healpix_nside128.parquet \
+  --lon-convention 0_360
+
+# Join aggregate data with HEALPix geometries
+healpyxel_geospatial join \
+  --aggregate month01_aggregated.parquet \
+  --output month01_geo.parquet \
+  --nside 128
+
+# Export to GeoTIFF
+healpyxel_geospatial export-tiff \
+  --input month01_aggregated.parquet \
+  --column r750_mean \
+  --output r750_mean.tif \
+  --nside 256 \
+  --crs IAU:19900
+
+# Cache management
+healpyxel_cache list
+healpyxel_cache generate --nsides 64 128 256
+healpyxel_cache verify --nsides 128
+healpyxel_cache info
+healpyxel_cache config
+```
+
+**Environment Variables:**
+- `HEALPYXEL_CACHE`: Override cache directory
+- `HEALPYXEL_CONFIG`: Override config directory
+- `XDG_CACHE_HOME`: XDG Base Directory for cache
+- `XDG_CONFIG_HOME`: XDG Base Directory for config
+
+**See Also:**
+- [Geospatial Guide](/guides/geospatial)
+- [CLI Reference](/cli/geospatial)

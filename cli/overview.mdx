@@ -1,0 +1,183 @@
+---
+title: CLI Reference Overview
+description: Overview of all HEALPyxel command-line tools for spatial data aggregation
+---
+
+HEALPyxel provides a comprehensive set of command-line tools for processing large planetary science datasets using HEALPix spatial indexing. The CLI implements a **split-apply-combine** workflow designed for efficiency and scalability.
+
+## Command Categories
+
+### Core Processing Commands
+
+These commands implement the main data processing pipeline:
+
+| Command | Purpose | Stage |
+|---------|---------|-------|
+| [healpyxel_sidecar](/cli/sidecar) | Map observations to HEALPix cells | Split |
+| [healpyxel_aggregate](/cli/aggregate) | Compute statistics per cell | Apply+Combine |
+| [healpyxel_to_geoparquet](/cli/to-geoparquet) | Add geometry for visualization | Export |
+
+### Streaming Processing Commands
+
+For incremental updates and large-scale streaming workflows:
+
+| Command | Purpose |
+|---------|--------|
+| [healpyxel_accumulator](/cli/accumulator) | Incrementally update cell statistics |
+| [healpyxel_finalize](/cli/finalize) | Convert accumulator state to final maps |
+
+### Utility Commands
+
+| Command | Purpose |
+|---------|--------|
+| [healpyxel_cache](/cli/cache) | Manage HEALPix geometry cache |
+
+## Quick Start Example
+
+```bash
+# 1. Generate HEALPix sidecar (SPLIT)
+healpyxel_sidecar \
+  --input observations.parquet \
+  --nside 64 128 \
+  --mode fuzzy \
+  --output-dir output/
+
+# 2. Aggregate by HEALPix cells (APPLY)
+healpyxel_aggregate \
+  --input observations.parquet \
+  --sidecar-dir output/ \
+  --sidecar-index 0 \
+  --aggregate \
+  --columns r750 r950 \
+  --aggs median robust_std \
+  --min-count 3
+
+# 3. Convert to GeoParquet for visualization
+healpyxel_to_geoparquet \
+  --aggregate-path output/observations-aggregated.*.parquet \
+  --output-dir output/ \
+  --lon-convention -180_180
+```
+
+## Workflow Patterns
+
+### Batch Processing
+
+Process entire datasets at multiple resolutions:
+
+```bash
+# Generate sidecars at multiple nsides
+healpyxel_sidecar -i data.parquet --nside 32 64 128 --mode fuzzy
+
+# Aggregate all sidecars in batch
+healpyxel_aggregate -i data.parquet --sidecar-index all --aggregate \
+  --columns value --aggs mean median std --densify -y
+```
+
+### Streaming Processing
+
+Incremental updates for growing datasets:
+
+```bash
+# Day 1: Initialize accumulator
+healpyxel_accumulator --input day001.parquet \
+  --columns r750 r950 --state-output state_v001.parquet
+
+# Day 2+: Incremental updates
+healpyxel_accumulator --input day002.parquet \
+  --columns r750 r950 \
+  --state-input state_v001.parquet --state-output state_v002.parquet
+
+# Finalize to statistics
+healpyxel_finalize --state state_v030.parquet --output mosaic.parquet \
+  --percentiles 25 50 75 --densify --nside 512
+```
+
+## Common Options
+
+All commands support these common patterns:
+
+### Input/Output
+
+- `-i, --input`: Input parquet file path
+- `-o, --output`: Output file or directory path
+- `-d, --output-dir`: Output directory (defaults to input directory)
+
+### HEALPix Parameters
+
+- `--nside`: HEALPix resolution (power of 2: 32, 64, 128, 256, ...)
+- `--order`: Cell ordering scheme (`nested` or `ring`, default: `nested`)
+- `--mode`: Assignment mode (`strict` or `fuzzy`)
+- `--lon-convention`: Longitude range (`0_360` or `-180_180`)
+
+### Processing Control
+
+- `-v, --verbose`: Enable debug logging
+- `-q, --quiet`: Suppress non-error output
+- `-y, --yes`: Skip confirmation prompts (batch mode)
+- `-n, --dry-run`: Preview operations without executing
+
+## Data Contracts
+
+Each command expects specific input formats and produces standardized outputs:
+
+### Sidecar Output
+
+```
+Columns: source_id (int64), healpix_id (uint64), weight (float64)
+Metadata: .meta.json with nside, mode, order
+```
+
+### Aggregate Output
+
+```
+Index: healpix_id
+Columns: {column}_{agg} for each value column and aggregation
+Example: r750_median, r750_robust_std, n_sources
+```
+
+### GeoParquet Output
+
+```
+Index: healpix_id
+Columns: geometry (Polygon), plus all aggregate columns
+CRS: EPSG:4326
+```
+
+## Performance Tips
+
+<Tip>
+**Use caching for repeated operations**
+
+Pre-generate HEALPix grids for frequently used nsides:
+
+```bash
+healpyxel_cache --generate 32 64 128 256
+```
+</Tip>
+
+<Tip>
+**Process in chunks for large datasets**
+
+Use `--dask-npartitions` for parallel processing:
+
+```bash
+healpyxel_aggregate --use-dask --dask-npartitions 8
+```
+</Tip>
+
+<Tip>
+**Filter early to reduce I/O**
+
+Apply quality filters during aggregation:
+
+```bash
+healpyxel_aggregate --filter "qa_flag > 0.8 and wavelength < 1000"
+```
+</Tip>
+
+## Next Steps
+
+- [Sidecar Command](/cli/sidecar) - Map observations to HEALPix cells
+- [Aggregate Command](/cli/aggregate) - Compute cell statistics
+- [Accumulator Command](/cli/accumulator) - Streaming data processing

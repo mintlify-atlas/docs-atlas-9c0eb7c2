@@ -1,0 +1,223 @@
+---
+title: Installation
+description: Install HEALPyxel with pip or conda, including optional dependencies and Windows workarounds
+---
+
+## Requirements
+
+HEALPyxel requires:
+- **Python**: 3.10 or higher
+- **C/C++ toolchain**: Required for compiling `healpy` (includes cfitsio and HEALPix C++ library)
+
+## Basic Installation
+
+Install HEALPyxel using pip:
+
+```bash
+pip install healpyxel
+```
+
+<Note>
+This installation method requires a working C/C++ toolchain. Windows users should use conda (see below) or WSL2.
+</Note>
+
+## Core Dependencies
+
+The base installation includes:
+- `pandas` >= 2.0
+- `numpy` >= 1.24
+- `pyarrow` >= 12.0
+- `healpy` >= 1.16
+- `click` >= 8.0
+- `tqdm`
+
+## Optional Dependencies
+
+HEALPyxel provides several optional dependency groups for different workflows:
+
+<Steps>
+
+<Step title="Geospatial Operations">
+Required for sidecar generation from GeoParquet files:
+
+```bash
+pip install healpyxel[geospatial]
+```
+
+**Includes:**
+- `geopandas` >= 0.14
+- `shapely` >= 2.0
+- `dask-geopandas` >= 0.3
+- `antimeridian`
+</Step>
+
+<Step title="Streaming & Incremental Statistics">
+For processing data in batches with the accumulator:
+
+```bash
+pip install healpyxel[streaming]
+```
+
+**Includes:**
+- `tdigest` (for percentile tracking)
+</Step>
+
+<Step title="Visualization">
+For creating maps and plots:
+
+```bash
+pip install healpyxel[viz]
+```
+
+**Includes:**
+- `matplotlib` >= 3.5
+- `scikit-image` >= 0.20
+- `skyproj` >= 0.2
+</Step>
+
+<Step title="Development Tools">
+For contributing to HEALPyxel development:
+
+```bash
+pip install healpyxel[dev]
+```
+
+**Includes:**
+- `nbdev` >= 2.3.12
+- `jupyter`
+- `pytest` >= 7.0
+- `pytest-cov` >= 4.0
+- `black` >= 23.0
+- `ruff` >= 0.1.0
+- `mypy` >= 1.0
+- `build` >= 0.10
+- `twine` >= 4.0
+</Step>
+
+<Step title="All Optional Dependencies">
+Install everything except dev tools:
+
+```bash
+pip install healpyxel[all]
+```
+
+This includes: `geospatial`, `streaming`, and `viz` packages.
+</Step>
+
+</Steps>
+
+## Windows Installation
+
+<Warning>
+Windows users cannot use standard pip installation due to C/C++ compilation requirements for `healpy`. Use one of the workarounds below.
+</Warning>
+
+### Option 1: Conda (Recommended)
+
+Conda-forge provides prebuilt Windows binaries:
+
+```bash
+conda install -c conda-forge healpy
+pip install healpyxel
+```
+
+<Tip>
+This is the recommended approach for Windows users as it avoids compilation issues entirely.
+</Tip>
+
+### Option 2: WSL2 (Windows Subsystem for Linux)
+
+Use WSL2 with Ubuntu for a native Linux environment:
+
+<CodeGroup>
+
+```bash WSL2 Setup
+# In WSL2 Ubuntu terminal
+sudo apt update
+sudo apt install python3-pip
+pip install healpyxel
+```
+
+```bash With Optional Dependencies
+# In WSL2 Ubuntu
+pip install healpyxel[all]
+```
+
+</CodeGroup>
+
+## Verification
+
+Verify your installation by checking the version and importing the package:
+
+```python
+import healpyxel
+print(healpyxel.__version__)
+
+# Check available modules
+from healpyxel import sidecar, aggregate, accumulator, finalize
+print("Installation successful!")
+```
+
+You should also have access to the CLI tools:
+
+```bash
+healpyxel_sidecar --help
+healpyxel_aggregate --help
+healpyxel_accumulator --help
+healpyxel_finalize --help
+healpyxel_to_geoparquet --help
+healpyxel_cache --help
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+
+<Accordion title="ImportError: No module named 'healpy'">
+The `healpy` package failed to install. On Windows, use conda to install healpy first:
+
+```bash
+conda install -c conda-forge healpy
+pip install healpyxel
+```
+</Accordion>
+
+<Accordion title="Compilation errors during installation">
+You need a C/C++ compiler and development headers:
+
+**Ubuntu/Debian:**
+```bash
+sudo apt install build-essential python3-dev libcfitsio-dev
+pip install healpyxel
+```
+
+**macOS:**
+```bash
+xcode-select --install
+pip install healpyxel
+```
+</Accordion>
+
+<Accordion title="ImportError: cannot import name 'dask_geopandas'">
+You're trying to use geospatial features without the optional dependencies:
+
+```bash
+pip install healpyxel[geospatial]
+```
+</Accordion>
+
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+
+<Card title="Quick Start" icon="rocket" href="/quickstart">
+Get started with a basic workflow
+</Card>
+
+<Card title="CLI Reference" icon="terminal" href="/cli/overview">
+Explore command-line tools
+</Card>
+
+</CardGroup>

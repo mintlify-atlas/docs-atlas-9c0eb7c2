@@ -1,0 +1,395 @@
+---
+title: healpyxel_accumulator
+description: Incrementally accumulate streaming data into HEALPix cells
+---
+
+The `healpyxel_accumulator` command processes data in batches, maintaining running statistics without storing raw observations. This enables incremental updates for growing datasets and streaming workflows.
+
+## Overview
+
+The accumulator implements **streaming statistics** using Welford's algorithm for mean/std and T-Digest for approximate percentiles. It's designed for scenarios where:
+
+- Data arrives in batches over time (daily acquisitions, mission phases)
+- Full reprocessing is expensive or impractical
+- Memory constraints prevent loading entire datasets
+
+## Basic Usage
+
+```bash
+# Initialize from first batch
+healpyxel_accumulator \
+  --input day001.parquet \
+  --sidecar sidecars/day001_nside-512.parquet \
+  --columns r750 r950 \
+  --state-output state_v001.parquet
+
+# Incremental update with second batch
+healpyxel_accumulator \
+  --input day002.parquet \
+  --sidecar sidecars/day002_nside-512.parquet \
+  --columns r750 r950 \
+  --state-input state_v001.parquet \
+  --state-output state_v002.parquet
+```
+
+## Required Arguments
+
+<ParamField path="--input" type="path" required>
+  Input parquet file with new observations for this batch.
+  
+  **Example:**
+  ```bash
+  -i observations_day001.parquet
+  ```
+</ParamField>
+
+<ParamField path="--columns" type="string[]" required>
+  Column names to accumulate (space-separated).
+  
+  **Example:**
+  ```bash
+  --columns r750 r950 vis_slope
+  ```
+</ParamField>
+
+<ParamField path="--state-output" type="path" required>
+  Output state file path for this accumulation step.
+  
+  **Naming convention:** Use versioned names (e.g., `state_v001.parquet`, `state_v002.parquet`)
+  
+  **Example:**
+  ```bash
+  --state-output state/state_v030.parquet
+  ```
+</ParamField>
+
+## Sidecar Arguments
+
+<ParamField path="--sidecar" type="path">
+  HEALPix sidecar mapping file. Auto-detected if not specified.
+  
+  **Example:**
+  ```bash
+  --sidecar sidecars/day001_nside-512.parquet
+  ```
+</ParamField>
+
+<ParamField path="--nside" type="int">
+  nside for auto-detection of sidecar file (used with --mode).
+  
+  **Example:**
+  ```bash
+  --nside 512 --mode fuzzy  # Auto-find matching sidecar
+  ```
+</ParamField>
+
+<ParamField path="--mode" type="choice" default="fuzzy">
+  Assignment mode for sidecar auto-detection.
+  
+  **Choices:** fuzzy, strict
+  
+  **Example:**
+  ```bash
+  --mode fuzzy
+  ```
+</ParamField>
+
+<Note>
+**Auto-detection:** If `--sidecar` is not specified, the accumulator searches for matching sidecar files in:
+1. Same directory as input file
+2. `sidecars/` subdirectory
+
+Filename pattern: `{input_stem}.cell-healpix_assignment-{mode}_nside-{nside}_order-nested.parquet`
+</Note>
+
+## State Management
+
+<ParamField path="--state-input" type="path">
+  Existing state file for incremental update. Omit for first batch.
+  
+  **Example:**
+  ```bash
+  --state-input state/state_v029.parquet
+  ```
+</ParamField>
+
+<Warning>
+**Compatibility validation:** State and sidecar must have matching:
+- `nside` (HEALPix resolution)
+- `mode` (strict/fuzzy assignment)
+- `order` (nested/ring ordering)
+
+Mismatched parameters will raise an error to prevent silent corruption.
+</Warning>
+
+## Optional Arguments
+
+### Filtering
+
+<ParamField path="--filter" type="string">
+  Pandas query expression to filter data before accumulation.
+  
+  **Example:**
+  ```bash
+  --filter "quality > 0.5 and solar_zenith < 80"
+  ```
+</ParamField>
+
+### Statistics Options
+
+<ParamField path="--no-tdigest" type="flag">
+  Disable T-Digest percentile tracking (reduces memory usage).
+  
+  **Example:**
+  ```bash
+  --no-tdigest  # Basic statistics only (mean, std, min, max)
+  ```
+</ParamField>
+
+<Note>
+**T-Digest** enables approximate percentile computation (median, quartiles) without storing raw data. It uses the [tdigest](https://pypi.org/project/tdigest/) library.
+
+Install with:
+```bash
+pip install healpyxel[streaming]
+```
+</Note>
+
+### Metadata
+
+<ParamField path="--batch-id" type="string">
+  Batch identifier for metadata tracking (e.g., observation date, mission phase).
+  
+  **Example:**
+  ```bash
+  --batch-id "2024-03-15"
+  ```
+</ParamField>
+
+### Logging
+
+<ParamField path="--verbose" type="flag">
+  Enable verbose debug logging.
+  
+  **Example:**
+  ```bash
+  -v
+  ```
+</ParamField>
+
+<ParamField path="--quiet" type="flag">
+  Suppress progress bars and non-critical messages.
+  
+  **Example:**
+  ```bash
+  -q
+  ```
+</ParamField>
+
+## Output Files
+
+### State Parquet File
+
+```
+{output_path}.parquet
+```
+
+**Columns:**
+- `healpix_id` (int64): HEALPix cell ID
+- `stats_json` (string): Serialized streaming statistics (count, sum, sum_sq, min, max)
+- `tdigests_json` (string): Serialized T-Digest data (if enabled)
+
+### Metadata JSON File
+
+```
+{output_path}.meta.json
+```
+
+**Contains:**
+- HEALPix parameters (nside, mode, order)
+- Processing metadata (timestamp, batch_id, columns)
+- Statistics summary (n_cells, total_observations)
+- Incremental update tracking (observations_before, observations_added)
+
+## Examples
+
+### Initialize Accumulator (First Batch)
+
+```bash
+healpyxel_accumulator \
+  --input observations_day001.parquet \
+  --sidecar sidecars/day001_nside-512.parquet \
+  --columns r750 r950 vis_slope \
+  --state-output state/state_v001.parquet \
+  --batch-id "day001"
+```
+
+**Output:**
+```
+state/state_v001.parquet
+state/state_v001.meta.json
+```
+
+### Incremental Update (Subsequent Batches)
+
+```bash
+healpyxel_accumulator \
+  --input observations_day002.parquet \
+  --sidecar sidecars/day002_nside-512.parquet \
+  --columns r750 r950 vis_slope \
+  --state-input state/state_v001.parquet \
+  --state-output state/state_v002.parquet \
+  --batch-id "day002"
+```
+
+### With Data Filtering
+
+```bash
+healpyxel_accumulator \
+  --input observations_day003.parquet \
+  --sidecar sidecars/day003_nside-512.parquet \
+  --columns r750 r950 \
+  --state-input state/state_v002.parquet \
+  --state-output state/state_v003.parquet \
+  --filter "quality > 0.5 and solar_zenith < 80"
+```
+
+### Auto-detect Sidecar
+
+```bash
+healpyxel_accumulator \
+  --input observations_day004.parquet \
+  --nside 512 \
+  --mode fuzzy \
+  --columns r750 r950 \
+  --state-input state/state_v003.parquet \
+  --state-output state/state_v004.parquet
+```
+
+### Disable T-Digest (Basic Statistics Only)
+
+```bash
+healpyxel_accumulator \
+  --input observations_day005.parquet \
+  --sidecar sidecars/day005_nside-512.parquet \
+  --columns r750 r950 \
+  --state-input state/state_v004.parquet \
+  --state-output state/state_v005.parquet \
+  --no-tdigest
+```
+
+## Workflow Pattern
+
+### Complete Streaming Pipeline
+
+```bash
+# Step 1: Generate sidecars for each batch
+for day in day{001..030}; do
+  healpyxel_sidecar \
+    --input observations_${day}.parquet \
+    --nside 512 \
+    --mode fuzzy \
+    --output-dir sidecars/
+done
+
+# Step 2: Initialize accumulator with first batch
+healpyxel_accumulator \
+  --input observations_day001.parquet \
+  --nside 512 --mode fuzzy \
+  --columns r750 r950 \
+  --state-output state/state_v001.parquet
+
+# Step 3: Incrementally update with remaining batches
+for i in {002..030}; do
+  prev=$((i - 1))
+  healpyxel_accumulator \
+    --input observations_day${i}.parquet \
+    --nside 512 --mode fuzzy \
+    --columns r750 r950 \
+    --state-input state/state_v$(printf "%03d" $prev).parquet \
+    --state-output state/state_v${i}.parquet \
+    --batch-id "day${i}"
+done
+
+# Step 4: Finalize to statistics
+healpyxel_finalize \
+  --state state/state_v030.parquet \
+  --output products/month01_mosaic.parquet \
+  --percentiles 25 50 75 \
+  --min-count 5
+```
+
+## Performance Considerations
+
+<Tip>
+**Memory efficiency:**
+
+The accumulator uses constant memory per cell regardless of observation count:
+- Streaming stats: ~100 bytes per cell per column
+- T-Digest: ~2 KB per cell per column (compression=100)
+
+For nside=512 (3M cells) with 3 columns:
+- Without T-Digest: ~1 GB
+- With T-Digest: ~18 GB
+</Tip>
+
+<Tip>
+**Processing speed:**
+
+Bottleneck is typically:
+1. I/O (reading input parquet)
+2. Sidecar join (groupby on healpix_id)
+3. T-Digest updates (if enabled)
+
+Expect ~1-5 minutes per batch (10-100k observations) on modern hardware.
+</Tip>
+
+## Troubleshooting
+
+### Error: "State/sidecar compatibility check failed"
+
+**Cause:** Mismatched HEALPix parameters.
+
+**Solution:** Verify state and sidecar have same nside/mode/order:
+```bash
+# Check state metadata
+cat state/state_v001.meta.json | jq '.nside, .mode, .order'
+
+# Check sidecar metadata
+cat sidecars/day002_nside-512.meta.json | jq '.healpix.nside, .healpix.mode'
+```
+
+### Error: "Could not find sidecar file"
+
+**Cause:** Auto-detection failed.
+
+**Solution:** Specify sidecar explicitly:
+```bash
+--sidecar sidecars/day002_nside-512.parquet
+```
+
+### Error: "Columns not found in input data"
+
+**Cause:** Specified columns don't exist in batch file.
+
+**Solution:** Verify column names match across all batches:
+```bash
+# Check input schema
+import pandas as pd
+df = pd.read_parquet("observations_day002.parquet")
+print(df.columns)
+```
+
+### Warning: "No matches found between sidecar and data"
+
+**Cause:** `source_id` mismatch or wrong sidecar file.
+
+**Impact:** No observations accumulated for this batch.
+
+**Solution:** Ensure sidecar was generated from the same input file.
+
+## See Also
+
+- [healpyxel_finalize](/cli/finalize) - Next step: compute final statistics
+- [healpyxel_sidecar](/cli/sidecar) - Generate sidecar mappings
+- [CLI Overview](/cli/overview) - Complete workflow documentation

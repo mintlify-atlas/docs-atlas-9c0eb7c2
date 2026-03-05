@@ -1,0 +1,330 @@
+---
+title: healpyxel_sidecar
+description: Generate HEALPix cell assignments for spatial observations
+---
+
+The `healpyxel_sidecar` command maps source geometries to HEALPix cells, creating a lightweight "sidecar" file that enables efficient spatial aggregation without modifying original data.
+
+## Overview
+
+The sidecar implements the **SPLIT** stage of the split-apply-combine pattern. It creates a compact mapping file (`source_id` → `healpix_id`) that links each observation to its HEALPix cell(s) at specified resolution(s).
+
+## Basic Usage
+
+```bash
+healpyxel_sidecar \
+  --input observations.parquet \
+  --nside 64 \
+  --mode fuzzy \
+  --lon-convention 0_360
+```
+
+## Required Arguments
+
+<ParamField path="--input" type="path" required>
+  Input GeoParquet file with observation data. Must contain geometries or explicit lon/lat columns.
+  
+  **Example:**
+  ```bash
+  --input test_data/samples/sample_50k.parquet
+  ```
+</ParamField>
+
+<ParamField path="--nside" type="int[]" required>
+  One or more HEALPix nside values (powers of 2). Each nside produces a separate sidecar file.
+  
+  **Valid values:** 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, ...
+  
+  **Example:**
+  ```bash
+  --nside 64 128 256  # Generate three sidecars
+  ```
+</ParamField>
+
+<ParamField path="--lon-convention" type="choice" required>
+  Longitude range convention for coordinate validation.
+  
+  **Choices:**
+  - `0_360`: Longitude in [0, 360) (planetocentric)
+  - `minus_plus180`: Longitude in [-180, 180) (Earth convention)
+  
+  **Example:**
+  ```bash
+  --lon-convention 0_360
+  ```
+</ParamField>
+
+## Assignment Modes
+
+<ParamField path="--mode" type="choice" default="fuzzy">
+  How observations are assigned to HEALPix cells.
+  
+  **Choices:**
+  - `fuzzy`: Assign to **all** cells touched by the observation footprint (recommended)
+  - `strict`: Assign only if **fully contained** within a single cell
+  
+  **Example:**
+  ```bash
+  --mode fuzzy  # Default: include partial overlaps
+  ```
+</ParamField>
+
+<Note>
+**Fuzzy mode** is recommended for most use cases because:
+- Preserves all observations (strict mode drops multi-cell footprints)
+- Enables area-weighted aggregation
+- Better represents instrument footprints that span cell boundaries
+</Note>
+
+## Optional Arguments
+
+### Output Control
+
+<ParamField path="--output_dir" type="path">
+  Directory for output sidecar files. Defaults to input file directory.
+  
+  **Example:**
+  ```bash
+  --output_dir sidecars/
+  ```
+</ParamField>
+
+<ParamField path="--no-coalesce" type="flag">
+  Write partitioned parquet instead of single coalesced file (for very large datasets).
+  
+  **Example:**
+  ```bash
+  --no-coalesce  # Outputs to *.parts/ directory
+  ```
+</ParamField>
+
+### Coordinate Handling
+
+<ParamField path="--lon-col" type="string">
+  Longitude column name (auto-detected if not specified).
+  
+  **Auto-detected names:** lon, longitude, spot_lon, x
+  
+  **Example:**
+  ```bash
+  --lon-col longitude
+  ```
+</ParamField>
+
+<ParamField path="--lat-col" type="string">
+  Latitude column name (auto-detected if not specified).
+  
+  **Auto-detected names:** lat, latitude, spot_lat, y
+  
+  **Example:**
+  ```bash
+  --lat-col latitude
+  ```
+</ParamField>
+
+### Geographic Statistics
+
+<ParamField path="--geo-stats" type="flag">
+  Compute and display geographical statistics (lon/lat ranges, mean, std) before processing.
+  
+  **Example:**
+  ```bash
+healpyxel_sidecar -i data.parquet --geo-stats
+  ```
+</ParamField>
+
+<ParamField path="--stats-sample-size" type="int" default="10000">
+  Number of rows to sample when extracting coordinates from geometry.
+  
+  **Example:**
+  ```bash
+  --stats-sample-size 50000
+  ```
+</ParamField>
+
+### Performance
+
+<ParamField path="--ncores" type="int">
+  Number of CPU cores for parallel processing. Defaults to `cpu_count - 1`.
+  
+  **Example:**
+  ```bash
+  --ncores 8
+  ```
+</ParamField>
+
+### Advanced: Point Spread Function (PSF)
+
+<ParamField path="--data-psf" type="choice" default="none">
+  Data point spread function type for weighted assignment.
+  
+  **Choices:** none, gaussian
+  
+  **Example:**
+  ```bash
+  --data-psf gaussian --data-psf-sigma-level 2.0
+  ```
+</ParamField>
+
+<ParamField path="--cell-psf" type="choice" default="none">
+  Cell spread function type for weighted assignment.
+  
+  **Choices:** none, gaussian
+</ParamField>
+
+<ParamField path="--psf-combine" type="choice" default="multiply">
+  How to combine data and cell PSF weights.
+  
+  **Choices:** multiply, sum, min, max
+</ParamField>
+
+<ParamField path="--no-psf-normalize" type="flag">
+  Disable normalization of weights per cell.
+</ParamField>
+
+## Output Files
+
+For each nside, generates two files:
+
+### Sidecar Parquet File
+
+```
+{input_stem}.cell-healpix_assignment-{mode}_nside-{nside}_order-nested.parquet
+```
+
+**Columns:**
+- `source_id` (int64): Row index from input file
+- `healpix_id` (uint64): HEALPix cell ID
+- `weight` (float64): Assignment weight (1.0 in default mode)
+
+**Example:** `sample_50k.cell-healpix_assignment-fuzzy_nside-64_order-nested.parquet`
+
+### Metadata JSON File
+
+```
+{input_stem}.cell-healpix_assignment-{mode}_nside-{nside}_order-nested.meta.json
+```
+
+**Contains:**
+- Processing timestamp and parameters
+- HEALPix configuration (nside, mode, order)
+- Coordinate convention
+- Source file reference
+
+## Examples
+
+### Basic Sidecar Generation
+
+```bash
+healpyxel_sidecar \
+  --input observations.parquet \
+  --nside 64 \
+  --mode fuzzy \
+  --lon-convention 0_360
+```
+
+**Output:**
+```
+observations.cell-healpix_assignment-fuzzy_nside-64_order-nested.parquet
+observations.cell-healpix_assignment-fuzzy_nside-64_order-nested.meta.json
+```
+
+### Multiple Resolutions
+
+```bash
+healpyxel_sidecar \
+  --input sample_50k.parquet \
+  --nside 32 64 128 \
+  --mode fuzzy \
+  --lon-convention 0_360 \
+  --output_dir sidecars/
+```
+
+**Output:** 6 files (3 sidecars + 3 metadata files)
+
+### Check Data Quality First
+
+```bash
+# View geographic statistics before processing
+healpyxel_sidecar \
+  --input observations.parquet \
+  --geo-stats \
+  --lon-convention 0_360
+```
+
+**Output:**
+```
+Geographical Statistics
+Statistic      Longitude            Latitude
+Count          50,000               50,000
+Min            0.234567             -89.456123
+Max            359.876543           88.234567
+Mean           180.123456           0.456789
+Std Dev        103.456789           51.234567
+
+Suggested convention: --lon-convention 0_360
+```
+
+### Explicit Column Names
+
+```bash
+healpyxel_sidecar \
+  --input custom_data.parquet \
+  --lon-col spot_lon \
+  --lat-col spot_lat \
+  --nside 128 \
+  --mode strict \
+  --lon-convention minus_plus180
+```
+
+## Performance Considerations
+
+<Tip>
+**For large datasets (>10M rows):**
+
+```bash
+healpyxel_sidecar \
+  --input large_dataset.parquet \
+  --nside 256 \
+  --ncores 16 \
+  --no-coalesce  # Use partitioned output
+```
+</Tip>
+
+<Warning>
+**Memory usage scales with:**
+- Number of observations
+- Number of nsides requested
+- Footprint complexity (fuzzy mode)
+
+For very large datasets, process nsides separately or use `--no-coalesce`.
+</Warning>
+
+## Troubleshooting
+
+### Error: "Could not auto-detect lon/lat columns"
+
+**Solution:** Specify columns explicitly:
+```bash
+--lon-col longitude --lat-col latitude
+```
+
+### Error: "Latitude out of valid range"
+
+**Solution:** Check coordinate convention:
+```bash
+--geo-stats  # Examine actual data ranges
+```
+
+### Warning: "Dropped N geometries during pre-filter"
+
+**Reason:** Coordinates outside specified lon_convention bounds.
+
+**Solution:** Verify lon_convention matches your data:
+- Planetary data: typically `0_360`
+- Earth data: typically `minus_plus180`
+
+## See Also
+
+- [healpyxel_aggregate](/cli/aggregate) - Next step: aggregate by cells
+- [CLI Overview](/cli/overview) - Complete workflow documentation

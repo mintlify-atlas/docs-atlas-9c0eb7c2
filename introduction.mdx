@@ -1,0 +1,116 @@
+---
+title: "Introduction"
+description: "Efficient HEALPix-based spatial aggregation for planetary science and geospatial data"
+---
+
+# Welcome to HEALPyxel
+
+HEALPyxel is a Python library designed for efficient spatial data aggregation using the HEALPix (Hierarchical Equal Area isoLatitude Pixelization) grid system. Built specifically for planetary science and geospatial data processing, it implements a powerful **Split-Apply-Combine** workflow for handling large-scale, sparse observation datasets.
+
+## What is HEALPix?
+
+**HEALPix** is a standard for partitioning a sphere (like a planet or the sky) into pixels of equal surface area. Unlike traditional rectangular map projections, HEALPix ensures:
+
+- **Equal-area pixels** — Every cell has the same size, making statistical analysis valid across the entire globe, including the poles
+- **Hierarchical structure** — Easily increase or decrease resolution while maintaining spatial relationships
+- **Fast computation** — Efficient neighbor searches and spherical harmonic transforms
+
+## Why HEALPyxel?
+
+Traditional approaches to planetary data processing face two major challenges:
+
+<CardGroup cols={2}>
+  <Card title="Projection Bias" icon="earth-americas">
+    Standard grids distort the poles, making global surface calculations mathematically biased
+  </Card>
+  <Card title="Memory Constraints" icon="memory">
+    Modern missions generate billions of points — loading entire high-resolution maps into RAM is often impossible
+  </Card>
+</CardGroup>
+
+HEALPyxel solves these problems by treating the sphere as a **modern data engineering target** rather than just a geometric grid.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Sidecar Pattern" icon="link">
+    Index your data without modifying original source files using lightweight sidecar files
+  </Card>
+  <Card title="Streaming Support" icon="water">
+    Update global maps incrementally as new data arrives without reprocessing historical archives
+  </Card>
+  <Card title="Robust Statistics" icon="chart-line">
+    Built-in support for MAD and robust_std for outlier-resistant analysis
+  </Card>
+  <Card title="GeoParquet Integration" icon="database">
+    Modern geospatial workflows with efficient columnar storage
+  </Card>
+</CardGroup>
+
+## Who Should Use HEALPyxel?
+
+HEALPyxel is ideal for researchers and data engineers working with **sparse, irregular, or streaming planetary and astronomical datasets:**
+
+- **Remote Sensing & Planetary Science** — Designed for instruments like 1-point spectrometers, laser altimeters, and push-broom spectrometers
+- **Large-Scale Data Engineering** — Process TB-scale datasets using Split-Apply-Combine on GeoParquet
+- **Streaming Workflows** — Incremental ingestion without reprocessing entire archives
+
+## The Split-Apply-Combine Workflow
+
+HEALPyxel implements a clean three-step pattern:
+
+<Steps>
+  <Step title="Split (Sidecar)">
+    Map observations to HEALPix cells without modifying original data
+  </Step>
+  <Step title="Apply (Aggregate)">
+    Calculate statistics per cell using robust aggregation functions
+  </Step>
+  <Step title="Combine (Finalize)">
+    Generate final maps or continue streaming accumulation
+  </Step>
+</Steps>
+
+## Quick Example
+
+```python
+from healpyxel import sidecar, aggregate
+
+# 1. Create sidecar mapping
+sidecar_df = sidecar.generate(
+    gdf,
+    nside=64,
+    mode="fuzzy",
+    order="nested"
+)
+
+# 2. Aggregate by HEALPix cells
+agg_df = aggregate.by_sidecar(
+    original=df,
+    sidecar=sidecar_df,
+    value_columns=["reflectance"],
+    aggs=["median", "robust_std"],
+    min_count=3
+)
+```
+
+## Ready to Get Started?
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install HEALPyxel and its dependencies
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get up and running in minutes
+  </Card>
+  <Card title="Core Concepts" icon="book" href="/concepts/healpix">
+    Understand the HEALPix grid system
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/sidecar">
+    Explore the Python API
+  </Card>
+</CardGroup>
+
+## Developed for MESSENGER/MASCS
+
+HEALPyxel was developed to process spectral observations from the MESSENGER/MASCS instrument studying Mercury's surface. While designed for MASCS, it's general-purpose and works with any planetary science dataset in GeoParquet format.

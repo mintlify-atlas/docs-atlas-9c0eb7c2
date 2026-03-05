@@ -1,0 +1,289 @@
+---
+title: 'Streaming Accumulation'
+description: 'Process large datasets with online statistics using the accumulator workflow'
+icon: 'database'
+---
+
+This example demonstrates the streaming accumulation workflow for processing large datasets that don't fit in memory.
+
+<Warning>
+  This workflow is **Work In Progress (WIP)** and subject to API changes and refinements.
+</Warning>
+
+## Overview
+
+The accumulator workflow allows you to:
+
+1. **Process data in batches** - Handle datasets larger than memory
+2. **Maintain streaming statistics** - Compute mean, std, percentiles incrementally
+3. **Resume from checkpoints** - Save/load intermediate state
+4. **Compare with full aggregation** - Validate approximate results
+
+## Setup
+
+```python
+import healpyxel
+from healpyxel.sidecar import process_partition
+from healpyxel.aggregate import aggregate_by_sidecar
+from healpyxel.accumulator import accumulate_batch, save_state, load_state
+from healpyxel.metadata import HEALPyxelxMetadata
+import pandas as pd
+import numpy as np
+import geopandas as gpd
+from pathlib import Path
+from shapely import wkb
+import matplotlib.pyplot as plt
+
+print(f"healpyxel version: {healpyxel.__version__}")
+```
+
+## Discover Batch Data
+
+```python
+test_data_dir = Path('../test_data')
+batches_dir = test_data_dir / 'batches'
+
+if batches_dir.exists():
+    batch_files = sorted(batches_dir.glob('batch_*.parquet'))
+    print(f"Found {len(batch_files)} batch files!")
+    print(f"\nFirst few batches:")
+    for f in batch_files:
+        size_mb = f.stat().st_size / 1024 / 1024
+        print(f"  {f.name}: {size_mb:.2f} MB")
+else:
+    print("Batch data not found. Run create_test_data.sh to generate test data.")
+    batch_files = []
+```
+
+## Load and Visualize Batch Coverage
+
+```python
+from healpyxel.geospatial import is_geometry_valid
+
+batch_files_loaded = [
+    gdf[gdf['geometry'].apply(is_geometry_valid)]
+    for gdf in (gpd.read_parquet(f) for f in batch_files)
+]
+
+print("Number of geometries in each batch:")
+for k, gdf in zip(batch_files, batch_files_loaded):
+    print(f"{k.stem}: {len(gdf)}")
+
+# Plot all batches
+fig, ax = plt.subplots(figsize=(20, 10))
+colors = plt.cm.tab10.colors
+for i, gdf in enumerate(batch_files_loaded):
+    gdf.plot(ax=ax, color=colors[i % len(colors)], linewidth=3)
+ax.set_aspect(0.25)
+ax.set_title("Batch Coverage Map")
+plt.show()
+```
+
+## Step 1: Create Sidecars for Each Batch
+
+```python
+# Configuration
+nside = 32
+mode = 'fuzzy'
+lon_convention = '0_360'
+
+n_batches_to_process = len(batch_files_loaded)
+
+sidecars = []
+for i, gdf in enumerate(batch_files_loaded[:n_batches_to_process]):
+    print(f"\n[{i+1}/{n_batches_to_process}] Processing batch {i+1}...")
+
+    sidecar = process_partition(
+        gdf=gdf,
+        nside=nside,
+        mode=mode,
+        base_index=0,
+        lon_convention=lon_convention
+    )
+    
+    sidecar['batch'] = i
+    sidecars.append(sidecar)
+    
+    print(f"  ✓ Created {len(sidecar)} assignments from {len(gdf)} geometries")
+    print(f"    Unique cells: {sidecar['healpix_id'].nunique()}")
+
+# Combine all sidecars
+combined_sidecar = pd.concat(sidecars, ignore_index=True)
+print(f"\nCombined sidecar: {len(combined_sidecar)} rows")
+print(f"Unique cells: {combined_sidecar['healpix_id'].nunique()}")
+```
+
+## Step 2: Stream Data with Accumulator
+
+<Steps>
+  <Step title="Initialize metadata">
+    ```python
+    meta = HEALPyxelxMetadata(
+        nside=nside,
+        mode="nested",
+        order="nested",
+        npix=12 * nside**2,
+        lon_convention=lon_convention
+    )
+    ```
+  </Step>
+  
+  <Step title="Process batches incrementally">
+    ```python
+    state_output_dir = Path("/tmp/state/")
+    state_output_dir.mkdir(exist_ok=True)
+    value_columns = ['r1050']
+    use_tdigest = True
+
+    accumulated_state = None
+    state_history = []
+
+    for i, gdf in enumerate(batch_files_loaded[:n_batches_to_process]):
+        print(f"\n[{i+1}/{n_batches_to_process}] Accumulating batch {i+1}...")
+        
+        batch_sidecar = sidecars[i]
+        batch_data = gdf.drop(columns=['geometry']).copy()
+        batch_data.index = batch_data.index.astype(np.int64)
+        batch_data.index.name = 'source_id'
+        
+        accumulated_state = accumulate_batch(
+            new_data=batch_data,
+            sidecar=batch_sidecar,
+            value_columns=value_columns,
+            existing_state=accumulated_state,
+            use_tdigest=use_tdigest
+        )
+        
+        # Save checkpoint
+        state_path = state_output_dir / f"state_v{i+1:03d}.parquet"
+        save_state(
+            state=accumulated_state,
+            output_path=state_path,
+            meta=meta,
+            processing_metadata={"batch_id": f"batch_{i+1}"}
+        )
+        
+        print(f"  ✓ State: {len(accumulated_state)} cells")
+        print(f"  ✓ Saved to {state_path}")
+    ```
+  </Step>
+  
+  <Step title="Extract final statistics">
+    ```python
+    state_path = state_output_dir / f"state_v{n_batches_to_process:03d}.parquet"
+    accumulated_state_loaded, state_meta = load_state(state_path, use_tdigest=True)
+
+    accumulated_stats_rows = []
+    for healpix_id, accumulator in accumulated_state_loaded.items():
+        row = {'healpix_id': int(healpix_id)}
+        
+        for col in value_columns:
+            if col in accumulator.stats_by_column:
+                stats = accumulator.stats_by_column[col]
+                row[f'{col}_mean'] = stats.mean
+                row[f'{col}_std'] = stats.std
+                row[f'{col}_n'] = stats.n
+        
+        accumulated_stats_rows.append(row)
+
+    accumulated_df = pd.DataFrame(accumulated_stats_rows)
+    print(f"\nExtracted {len(accumulated_df)} cells with statistics")
+    ```
+  </Step>
+</Steps>
+
+## Step 3: Compare with Full Aggregation
+
+```python
+# Full batch aggregation for ground truth
+full_aggregated = aggregate_by_sidecar(
+    original=combined_data,
+    sidecar=combined_sidecar,
+    value_columns=value_columns,
+    aggs=['mean', 'median', 'std', 'min', 'max'],
+    source_id_col='source_id',
+    healpix_col='healpix_id',
+    min_count=1,
+    sentinel_threshold=1e30
+)
+
+print(f"Full aggregation: {len(full_aggregated)} cells")
+
+# Merge for comparison
+comparison = accumulated_df.merge(
+    full_aggregated,
+    on='healpix_id',
+    how='inner'
+)
+
+print(f"\n{len(comparison)} cells matched between methods")
+
+# Statistical comparison
+for col in value_columns:
+    approx_mean_col = f'{col}_approx_mean'
+    full_mean_col = f'{col}_mean'
+    
+    print(f"\n{col}:")
+    print(f"  Approx mean: {comparison[approx_mean_col].mean():.6f}")
+    print(f"  Full mean:   {comparison[full_mean_col].mean():.6f}")
+    
+    mean_diff = comparison[approx_mean_col] - comparison[full_mean_col]
+    print(f"  Max diff:    {mean_diff.abs().max():.6e}")
+```
+
+## Visualize Results
+
+```python
+import healpy as hp
+
+npix = hp.nside2npix(nside)
+
+# Create HEALPix maps
+approx_map = np.full(npix, hp.UNSEEN, dtype=np.float64)
+full_map = np.full(npix, hp.UNSEEN, dtype=np.float64)
+
+for col in value_columns:
+    healpix_ids = accumulated_df['healpix_id'].values.astype(int)
+    means = accumulated_df[f'{col}_approx_mean'].values
+    approx_map[healpix_ids] = means
+    
+    healpix_ids = full_aggregated.index.values.astype(int)
+    means = full_aggregated[f'{col}_mean'].values
+    full_map[healpix_ids] = means
+
+# Render
+hp.mollview(approx_map, title="Approximate (StreamingStats)", unit="r1050")
+hp.mollview(full_map, title="Full Aggregation", unit="r1050")
+
+diff_map = approx_map.copy()
+valid_mask = (approx_map != hp.UNSEEN) & (full_map != hp.UNSEEN)
+diff_map[~valid_mask] = hp.UNSEEN
+diff_map[valid_mask] = approx_map[valid_mask] - full_map[valid_mask]
+
+hp.mollview(diff_map, title="Difference (Approx - Full)", unit="Δr1050")
+```
+
+## Summary
+
+This workflow demonstrated:
+
+1. **Sidecar Creation** - Assigned HEALPix cells to batch geometries
+2. **Incremental Accumulation** - Computed streaming statistics without loading all data
+3. **State Persistence** - Saved checkpoints for resumable processing
+4. **Validation** - Compared approximate results with full aggregation
+
+<Note>
+  **Performance Tip**: For production workflows, use the CLI tools which handle parallelization and memory management automatically.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="CLI Accumulator" icon="terminal" href="/cli/accumulator">
+    Learn the `healpix_accumulator` command
+  </Card>
+  
+  <Card title="Finalize Maps" icon="check" href="/api/finalize">
+    Convert accumulated state to final HEALPix products
+  </Card>
+</CardGroup>

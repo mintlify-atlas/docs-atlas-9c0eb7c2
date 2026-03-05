@@ -1,0 +1,400 @@
+---
+title: healpyxel_to_geoparquet
+description: Convert aggregate output to GeoParquet with HEALPix cell geometries
+---
+
+The `healpyxel_to_geoparquet` command attaches HEALPix cell polygon geometries to aggregated statistics, producing GeoParquet files that can be visualized in QGIS, ArcGIS, and other GIS software.
+
+## Overview
+
+This command adds a `geometry` column to aggregate output by:
+1. Reading the aggregate parquet file (output from `healpyxel_aggregate` or `healpyxel_finalize`)
+2. Generating HEALPix cell polygons for each `healpix_id`
+3. Joining geometries with aggregate statistics
+4. Writing GeoParquet with spatial metadata
+
+## Basic Usage
+
+```bash
+healpyxel_to_geoparquet \
+  --aggregate-path output/observations-aggregated.parquet \
+  --output-dir output/ \
+  --lon-convention -180_180
+```
+
+## Required Arguments
+
+<ParamField path="--aggregate-path" type="path" required>
+  Path to aggregate parquet file (from `healpyxel_aggregate` or `healpyxel_finalize`).
+  
+  **Must be:** `.parquet` file, NOT `.meta.json` metadata
+  
+  **Example:**
+  ```bash
+  -a output/observations-aggregated.parquet
+  ```
+</ParamField>
+
+<Warning>
+**Common mistake:** Passing metadata file instead of parquet file.
+
+```bash
+# WRONG
+--aggregate-path file.meta.json
+
+# CORRECT
+--aggregate-path file.parquet
+```
+
+The command will reject `.meta.json` files with a clear error message.
+</Warning>
+
+## Optional Arguments
+
+### Output Control
+
+<ParamField path="--output-suffix" type="string" default=".geo">
+  Suffix to append before `.parquet` extension.
+  
+  **Naming pattern:** `{input_stem}{suffix}.parquet`
+  
+  **Example:**
+  ```bash
+  --output-suffix .geo  # Default
+  # Input:  observations-aggregated.parquet
+  # Output: observations-aggregated.geo.parquet
+  ```
+</ParamField>
+
+<ParamField path="--output-dir" type="path">
+  Output directory. Defaults to same directory as input file.
+  
+  **Example:**
+  ```bash
+  -d geoparquet/
+  ```
+</ParamField>
+
+<ParamField path="--yes" type="flag">
+  Skip overwrite confirmation prompts (batch mode).
+  
+  **Example:**
+  ```bash
+  -y  # Automatically overwrite existing files
+  ```
+</ParamField>
+
+### HEALPix Parameters
+
+<ParamField path="--nside" type="int">
+  HEALPix nside. Auto-detected from metadata or filename if not specified.
+  
+  **Detection order:**
+  1. Explicit `--nside` argument (highest priority)
+  2. Metadata file (`.meta.json`)
+  3. Filename pattern (`nside-64`, `nside64`, etc.)
+  4. Row count (for dense aggregates only)
+  
+  **Example:**
+  ```bash
+  -n 64  # Explicit override
+  ```
+</ParamField>
+
+<ParamField path="--order" type="choice" default="nested">
+  HEALPix ordering scheme. Auto-detected from metadata if available.
+  
+  **Choices:** nested, ring
+  
+  **Example:**
+  ```bash
+  -O nested
+  ```
+</ParamField>
+
+<ParamField path="--lon-convention" type="choice" default="auto">
+  Longitude convention for polygon coordinates.
+  
+  **Choices:**
+  - `auto`: Read from metadata (default)
+  - `0_360`: Longitude in [0, 360)
+  - `-180_180`: Longitude in [-180, 180)
+  
+  **Example:**
+  ```bash
+  -l -180_180  # Force Earth convention
+  ```
+</ParamField>
+
+<Note>
+**Why longitude convention matters:**
+
+GIS software (QGIS, ArcGIS) typically expects longitude in [-180, 180) for Earth data. Planetary data often uses [0, 360).
+
+- **Earth data:** Use `-180_180`
+- **Planetary data (Mercury, Mars, Moon):** Use `0_360`
+
+The command handles antimeridian-crossing polygons automatically.
+</Note>
+
+### Geometry Options
+
+<ParamField path="--fix-antimeridian" type="flag" default="true">
+  Fix polygons crossing the antimeridian using `antimeridian.fix_polygon`.
+  
+  **Example:**
+  ```bash
+  --fix-antimeridian  # Default: enabled
+  --no-fix-antimeridian  # Disable
+  ```
+</ParamField>
+
+<ParamField path="--chunk-size" type="int" default="65536">
+  Number of pixels to process per chunk (memory control for large nsides).
+  
+  **Example:**
+  ```bash
+  -c 32768  # Reduce memory usage
+  ```
+</ParamField>
+
+### Sparsity Mode
+
+<ParamField path="--dense" type="flag">
+  Force densification to full HEALPix grid (adds empty cells with NaN).
+  
+  **Modes:**
+  - **Sparse** (default): Only cells with data (preserves original sparsity)
+  - **Dense**: All 12×nside² cells (uniform grid)
+  
+  **Example:**
+  ```bash
+  --dense  # Create full grid
+  ```
+</ParamField>
+
+<Warning>
+**Dense mode memory usage:**
+
+For nside=512 (3,145,728 cells), dense mode generates 3M+ polygons:
+- Memory: ~15 GB
+- Processing time: ~5-10 minutes
+- Output file: ~2 GB
+
+Use sparse mode unless visualization requires uniform grids.
+</Warning>
+
+### Cache Options
+
+<ParamField path="--cache-mode" type="choice" default="use">
+  HEALPix geometry cache policy.
+  
+  **Choices:**
+  - `use`: Load cache if available, compute otherwise (default)
+  - `require`: Fail if cache missing (strict mode)
+  - `off`: Ignore cache, always compute
+  
+  **Example:**
+  ```bash
+  --cache-mode require  # Ensure pre-generated cache is used
+  ```
+</ParamField>
+
+<Tip>
+**Pre-generate cache for frequently used nsides:**
+
+```bash
+healpyxel_cache --generate 32 64 128 256
+```
+
+Cache lookup is ~100x faster than computing geometries on-the-fly.
+</Tip>
+
+## Output Format
+
+### GeoParquet File
+
+```
+{input_stem}{suffix}.parquet
+```
+
+**Index:** `healpix_id`
+
+**Columns:**
+- `geometry`: Shapely Polygon (HEALPix cell boundary)
+- All columns from input aggregate file (statistics, counts, etc.)
+
+**Spatial metadata:**
+- CRS: `EPSG:4326` (WGS84 geographic coordinates)
+- Geometry type: Polygon
+
+**Example:**
+```
+observations-aggregated.geo.parquet
+  - healpix_id (index)
+  - geometry (Polygon)
+  - r750_median (float64)
+  - r750_robust_std (float64)
+  - n_sources (int64)
+```
+
+## Examples
+
+### Basic Conversion
+
+```bash
+healpyxel_to_geoparquet \
+  --aggregate-path output/observations-aggregated.parquet \
+  --output-dir output/
+```
+
+**Output:** `output/observations-aggregated.geo.parquet`
+
+### Multiple Aggregates (Batch Processing)
+
+```bash
+for f in output/*-aggregated*.parquet; do
+  healpyxel_to_geoparquet -a "$f" -d geoparquet/ -l -180_180 -y
+done
+```
+
+**Output:** All `.geo.parquet` files in `geoparquet/` directory
+
+### Force Dense Grid
+
+```bash
+healpyxel_to_geoparquet \
+  --aggregate-path sample_sparse.parquet \
+  --nside 64 \
+  --dense \
+  --output-dir dense/
+```
+
+### Use Pre-generated Cache
+
+```bash
+# Step 1: Generate cache
+healpyxel_cache --generate 64
+
+# Step 2: Require cache usage (fail if missing)
+healpyxel_to_geoparquet \
+  --aggregate-path output/observations-aggregated.parquet \
+  --cache-mode require
+```
+
+### Custom Output Suffix
+
+```bash
+healpyxel_to_geoparquet \
+  --aggregate-path observations-aggregated.parquet \
+  --output-suffix .spatial
+```
+
+**Output:** `observations-aggregated.spatial.parquet`
+
+## Visualization in QGIS
+
+### Loading GeoParquet
+
+1. Open QGIS
+2. Layer → Add Layer → Add Vector Layer
+3. Select `.geo.parquet` file
+4. Choose symbology (e.g., graduated colors by `r750_median`)
+
+### Recommended Settings
+
+**For sparse data:**
+- Symbology: Graduated (color ramp)
+- Classification: Quantile or Natural Breaks
+- Show only cells with data (no NaN handling needed)
+
+**For dense data:**
+- Symbology: Graduated
+- Handle NaN values: Set "No Data" color to transparent
+- Classification: Quantile (better for sparse coverage)
+
+## Performance Tips
+
+<Tip>
+**For large nsides (512+):**
+
+```bash
+healpyxel_to_geoparquet \
+  --aggregate-path large.parquet \
+  --chunk-size 32768 \
+  --cache-mode use
+```
+
+Reduced chunk size lowers peak memory usage.
+</Tip>
+
+<Tip>
+**For repeated processing:**
+
+Pre-generate cache once:
+```bash
+healpyxel_cache --generate 32 64 128 256 512
+```
+
+Then use `--cache-mode require` to ensure fast lookups.
+</Tip>
+
+## Troubleshooting
+
+### Error: "Input file is METADATA, not a PARQUET"
+
+**Cause:** Passed `.meta.json` file instead of `.parquet` file.
+
+**Solution:**
+```bash
+# WRONG
+--aggregate-path file.meta.json
+
+# CORRECT
+--aggregate-path file.parquet
+```
+
+### Error: "File is not a valid Parquet file"
+
+**Cause:** Corrupted or non-parquet file.
+
+**Solution:** Verify file with:
+```bash
+import pandas as pd
+df = pd.read_parquet("file.parquet")
+```
+
+### Error: "Cannot infer nside from sparse aggregate"
+
+**Cause:** Sparse aggregate with no metadata or filename pattern.
+
+**Solution:** Specify nside explicitly:
+```bash
+--nside 64
+```
+
+### Error: "Cache missing for nside=512"
+
+**Cause:** Using `--cache-mode require` without pre-generated cache.
+
+**Solution:** Generate cache first:
+```bash
+healpyxel_cache --generate 512
+```
+
+Or switch to `--cache-mode use` (auto-compute if missing).
+
+### Warning: "antimeridian.fix_polygon failed"
+
+**Impact:** Polygon may have invalid geometry near antimeridian.
+
+**Solution:** Usually harmless. Disable fix if problematic:
+```bash
+--no-fix-antimeridian
+```
+
+## See Also
+
+- [healpyxel_aggregate](/cli/aggregate) - Previous step: compute statistics
+- [healpyxel_cache](/cli/cache) - Manage geometry cache
+- [CLI Overview](/cli/overview) - Complete workflow documentation

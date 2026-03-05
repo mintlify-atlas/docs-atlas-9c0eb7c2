@@ -1,0 +1,285 @@
+---
+title: "Finalize API"
+description: "Convert accumulator state to final HEALPix maps with statistics"
+---
+
+## Overview
+
+The finalize module converts accumulator state to final HEALPix maps with statistics, computing mean, std, percentiles from streaming state.
+
+## Core Functions
+
+### finalize_statistics
+
+Convert accumulator state to final statistics DataFrame.
+
+```python
+def finalize_statistics(
+    state: Dict[int, CellAccumulator],
+    percentiles: Optional[List[float]] = None,
+    min_count: int = 1
+) -> pd.DataFrame
+```
+
+<ParamField path="state" type="Dict[int, CellAccumulator]" required>
+  Accumulator state dictionary mapping healpix_id to CellAccumulator
+</ParamField>
+
+<ParamField path="percentiles" type="List[float]" default="[]">
+  List of percentiles to compute (e.g., [25, 50, 75])
+</ParamField>
+
+<ParamField path="min_count" type="int" default="1">
+  Minimum observations required per cell (cells below this are NaN)
+</ParamField>
+
+<ResponseField name="return" type="pd.DataFrame">
+  DataFrame indexed by healpix_id with statistics columns:
+  - `[col]_n`: observation count
+  - `[col]_mean`: mean value
+  - `[col]_std`: standard deviation
+  - `[col]_min`: minimum value
+  - `[col]_max`: maximum value
+  - `[col]_p[N]`: percentile (if T-Digest available)
+</ResponseField>
+
+**Example:**
+```python
+from healpyxel.accumulator import load_state
+from healpyxel.finalize import finalize_statistics
+
+# Load accumulated state
+state, meta = load_state('state_v030.parquet')
+
+# Finalize statistics
+result = finalize_statistics(
+    state=state,
+    percentiles=[25, 50, 75],
+    min_count=5
+)
+
+print(result.columns)
+# ['r750_n', 'r750_mean', 'r750_std', 'r750_min', 'r750_max',
+#  'r750_p25', 'r750_p50', 'r750_p75', ...]
+
+print(f"Cells with data: {len(result)}")
+print(f"Valid r750 cells: {(result['r750_n'] >= 5).sum()}")
+```
+
+---
+
+### densify_healpix_map
+
+Create a complete HEALPix grid by filling empty cells with fill_value.
+
+```python
+def densify_healpix_map(
+    sparse_df: pd.DataFrame,
+    nside: int,
+    fill_value: float = np.nan
+) -> pd.DataFrame
+```
+
+<ParamField path="sparse_df" type="pd.DataFrame" required>
+  DataFrame with healpix_id index (sparse)
+</ParamField>
+
+<ParamField path="nside" type="int" required>
+  HEALPix nside parameter
+</ParamField>
+
+<ParamField path="fill_value" type="float" default="np.nan">
+  Value for empty cells
+</ParamField>
+
+<ResponseField name="return" type="pd.DataFrame">
+  Dense DataFrame with all 12*nside² cells
+</ResponseField>
+
+**Example:**
+```python
+import healpy as hp
+from healpyxel.finalize import densify_healpix_map
+
+# Sparse result from finalize_statistics
+sparse_result = finalize_statistics(state, min_count=5)
+print(f"Sparse: {len(sparse_result)} cells")
+
+# Densify to full grid
+nside = 512
+dense_result = densify_healpix_map(sparse_result, nside)
+print(f"Dense: {len(dense_result)} cells")
+print(f"Expected: {hp.nside2npix(nside)} cells")
+
+assert len(dense_result) == hp.nside2npix(nside)
+```
+
+---
+
+### export_to_geotiff
+
+Export a column to GeoTIFF format (requires rasterio and healpy).
+
+```python
+def export_to_geotiff(
+    df: pd.DataFrame,
+    column: str,
+    output_path: Path,
+    nside: int,
+    crs: str = 'IAU:19900'
+)
+```
+
+<ParamField path="df" type="pd.DataFrame" required>
+  DataFrame with healpix_id index and data columns
+</ParamField>
+
+<ParamField path="column" type="str" required>
+  Column name to export
+</ParamField>
+
+<ParamField path="output_path" type="Path" required>
+  GeoTIFF output path
+</ParamField>
+
+<ParamField path="nside" type="int" required>
+  HEALPix nside parameter
+</ParamField>
+
+<ParamField path="crs" type="str" default="'IAU:19900'">
+  CRS string for GeoTIFF (default: Mercury IAU CRS)
+</ParamField>
+
+**Note:**
+This creates an equirectangular projection from HEALPix data at 0.25° resolution (1440×720 pixels).
+
+**Example:**
+```python
+from pathlib import Path
+from healpyxel.finalize import export_to_geotiff
+
+# Export mean reflectance to GeoTIFF
+export_to_geotiff(
+    df=result,
+    column='r750_mean',
+    output_path=Path('output_r750_mean.tif'),
+    nside=512,
+    crs='IAU:19900'  # Mercury CRS
+)
+
+print("✓ Exported GeoTIFF (1440×720)")
+```
+
+---
+
+## CLI Entry Point
+
+### main
+
+Main entry point for finalize command.
+
+```python
+def main(argv=None) -> int
+```
+
+**Command-line Usage:**
+
+```bash
+# Basic finalization
+healpyxel_finalize \
+  --state state_v030.parquet \
+  --output month01_mosaic.parquet
+
+# With percentiles and minimum count
+healpyxel_finalize \
+  --state state_v030.parquet \
+  --output month01.parquet \
+  --percentiles 25 50 75 \
+  --min-count 10
+
+# Densify to full grid
+healpyxel_finalize \
+  --state state_v030.parquet \
+  --output month01_dense.parquet \
+  --densify \
+  --nside 512
+
+# Export specific column to GeoTIFF
+healpyxel_finalize \
+  --state state_v030.parquet \
+  --output month01.parquet \
+  --export-tiff r750_mean output_r750.tif \
+  --nside 512
+```
+
+**Key Arguments:**
+- `--state`: Input state file from healpyxel_accumulator
+- `--output`: Output parquet file with statistics
+- `--percentiles`: Percentiles to compute (default: 25 50 75)
+- `--min-count`: Minimum observations per cell (default: 1)
+- `--densify`: Create full HEALPix grid (fill empty cells with NaN)
+- `--nside`: nside for densification (auto-detected from metadata if not specified)
+- `--export-tiff COLUMN OUTPUT`: Export a column to GeoTIFF
+- `--crs`: CRS for GeoTIFF export (default: IAU:19900 for Mercury)
+
+**Examples:**
+
+<Accordion title="Basic Finalization">
+```bash
+healpyxel_finalize \
+  --state state/state_v030.parquet \
+  --output products/month01_mosaic.parquet \
+  --min-count 5
+```
+
+Outputs sparse parquet with statistics for cells that have at least 5 observations.
+</Accordion>
+
+<Accordion title="Full Grid with Percentiles">
+```bash
+healpyxel_finalize \
+  --state state/state_v030.parquet \
+  --output products/month01_mosaic_dense.parquet \
+  --percentiles 10 25 50 75 90 \
+  --min-count 10 \
+  --densify \
+  --nside 512
+```
+
+Outputs dense parquet with all 12×512² = 3,145,728 cells, including percentiles.
+</Accordion>
+
+<Accordion title="Export to GeoTIFF">
+```bash
+healpyxel_finalize \
+  --state state/state_v030.parquet \
+  --output products/month01.parquet \
+  --export-tiff r750_median products/r750_median.tif \
+  --nside 512 \
+  --crs IAU:19900
+```
+
+Creates both the parquet statistics file and a GeoTIFF raster of the r750_median column.
+</Accordion>
+
+**Output Structure:**
+
+The output parquet file contains one row per HEALPix cell with columns:
+- `healpix_id` (index)
+- `{column}_n`: observation count
+- `{column}_mean`: mean value
+- `{column}_std`: standard deviation
+- `{column}_min`: minimum value
+- `{column}_max`: maximum value
+- `{column}_p{N}`: percentiles (if requested and T-Digest available)
+
+**Metadata:**
+The output includes a companion `.meta.json` file with:
+- Processing stage: `finalize`
+- HEALPix parameters: nside, order, mode
+- Statistics configuration: percentiles, min_count, densified flag
+- Source state file reference
+
+**See Also:**
+- [Finalize Guide](/guides/streaming)
+- [CLI Reference](/cli/finalize)

@@ -1,0 +1,417 @@
+---
+title: "Aggregate API"
+description: "Aggregate spatial data by HEALPix cells using sidecar mappings"
+---
+
+## Overview
+
+The aggregate module implements the "apply" step of a split-apply-combine strategy, aggregating data by HEALPix cells using sidecar mappings.
+
+## Core Functions
+
+### aggregate_by_sidecar
+
+Aggregate original DataFrame by HEALPix cells using a sidecar mapping.
+
+```python
+def aggregate_by_sidecar(
+    original: pd.DataFrame,
+    sidecar: pd.DataFrame,
+    value_columns: Sequence[str],
+    aggs: Optional[Sequence[str]] = None,
+    min_count: int = 1,
+    source_id_col: str = "source_id",
+    healpix_col: str = "healpix_id",
+    sentinel_threshold: float = 1e30
+) -> pd.DataFrame
+```
+
+<ParamField path="original" type="pd.DataFrame" required>
+  DataFrame with data to aggregate
+</ParamField>
+
+<ParamField path="sidecar" type="pd.DataFrame" required>
+  DataFrame with source_id → healpix_id mapping
+</ParamField>
+
+<ParamField path="value_columns" type="Sequence[str]" required>
+  Column names to aggregate
+</ParamField>
+
+<ParamField path="aggs" type="Sequence[str]" default="['mean', 'median', 'std', 'robust_std']">
+  Aggregation functions to apply (options: `mean`, `median`, `std`, `min`, `max`, `mad`, `robust_std`)
+</ParamField>
+
+<ParamField path="min_count" type="int" default="1">
+  Minimum sources per cell (cells below threshold set to NaN)
+</ParamField>
+
+<ParamField path="source_id_col" type="str" default="'source_id'">
+  Name of source ID column
+</ParamField>
+
+<ParamField path="healpix_col" type="str" default="'healpix_id'">
+  Name of HEALPix ID column
+</ParamField>
+
+<ParamField path="sentinel_threshold" type="float" default="1e30">
+  Absolute value threshold for masking sentinel values
+</ParamField>
+
+<ResponseField name="return" type="pd.DataFrame">
+  Aggregated DataFrame with healpix_id as index and statistic columns
+</ResponseField>
+
+**Example:**
+```python
+import pandas as pd
+from healpyxel.aggregate import aggregate_by_sidecar
+
+# Load data
+data = pd.read_parquet('observations.parquet')
+sidecar = pd.read_parquet('sidecar_nside64.parquet')
+
+# Aggregate
+result = aggregate_by_sidecar(
+    original=data,
+    sidecar=sidecar,
+    value_columns=['reflectance', 'radiance'],
+    aggs=['mean', 'median', 'robust_std'],
+    min_count=5
+)
+
+print(result.columns)
+# ['reflectance_mean', 'reflectance_median', 'reflectance_robust_std',
+#  'radiance_mean', 'radiance_median', 'radiance_robust_std', 'n_sources']
+```
+
+---
+
+### densify_healpix_aggregates
+
+Densify aggregated DataFrame to include all HEALPix cells.
+
+```python
+def densify_healpix_aggregates(
+    agg_sparse_df: pd.DataFrame,
+    nside: int,
+    healpix_col: str = "healpix_id"
+) -> pd.DataFrame
+```
+
+<ParamField path="agg_sparse_df" type="pd.DataFrame" required>
+  Sparse aggregated DataFrame with healpix_id as index
+</ParamField>
+
+<ParamField path="nside" type="int" required>
+  HEALPix nside parameter
+</ParamField>
+
+<ParamField path="healpix_col" type="str" default="'healpix_id'">
+  Name of the HEALPix ID column (used as index)
+</ParamField>
+
+<ResponseField name="return" type="pd.DataFrame">
+  Densified DataFrame with all HEALPix cells (0 to 12*nside²-1), missing cells filled with NaN
+</ResponseField>
+
+**Example:**
+```python
+from healpyxel.aggregate import densify_healpix_aggregates
+import healpy as hp
+
+# Sparse aggregation result
+sparse_agg = aggregate_by_sidecar(data, sidecar, ['value'])
+print(f"Sparse cells: {len(sparse_agg)}")
+
+# Densify to full grid
+nside = 64
+dense_agg = densify_healpix_aggregates(sparse_agg, nside)
+print(f"Dense cells: {len(dense_agg)} (expected: {hp.nside2npix(nside)})")
+```
+
+---
+
+## Aggregation Functions
+
+### AGG_LOOKUP
+
+Dictionary of available aggregation functions.
+
+```python
+AGG_LOOKUP: Dict[str, Callable] = {
+    "mean": lambda a: float(np.nanmean(a)) if np.any(np.isfinite(a)) else float("nan"),
+    "median": lambda a: float(np.nanmedian(a)) if np.any(np.isfinite(a)) else float("nan"),
+    "std": lambda a: float(np.nanstd(a, ddof=0)) if np.any(np.isfinite(a)) else float("nan"),
+    "min": lambda a: float(np.nanmin(a)) if np.any(np.isfinite(a)) else float("nan"),
+    "max": lambda a: float(np.nanmax(a)) if np.any(np.isfinite(a)) else float("nan"),
+    "mad": lambda a: _mad(a),
+    "robust_std": lambda a: _robust_std(a),
+}
+```
+
+**Available Functions:**
+- `mean`: Arithmetic mean (ignores NaN)
+- `median`: Median value (ignores NaN)
+- `std`: Standard deviation (ignores NaN)
+- `min`: Minimum value (ignores NaN)
+- `max`: Maximum value (ignores NaN)
+- `mad`: Median Absolute Deviation (robust to outliers)
+- `robust_std`: Robust standard deviation (MAD × 1.4826)
+
+---
+
+## File Management
+
+### generate_output_filename
+
+Generate output filename that matches the parseable structure of the sidecar.
+
+```python
+def generate_output_filename(
+    input_file: Path,
+    sidecar_file: Path,
+    output_dir: Optional[Path] = None,
+    densified: bool = False
+) -> Path
+```
+
+<ParamField path="input_file" type="Path" required>
+  Original input parquet file
+</ParamField>
+
+<ParamField path="sidecar_file" type="Path" required>
+  Sidecar file being used
+</ParamField>
+
+<ParamField path="output_dir" type="Path" default="None">
+  Optional output directory (default: same as sidecar_file)
+</ParamField>
+
+<ParamField path="densified" type="bool" default="False">
+  If True, append '-densified' marker to filename
+</ParamField>
+
+<ResponseField name="return" type="Path">
+  Path to output file
+</ResponseField>
+
+**Pattern:**
+```
+{stem}-aggregated[-densified].{sidecar_suffix}.parquet
+```
+
+**Example:**
+```python
+from pathlib import Path
+from healpyxel.aggregate import generate_output_filename
+
+input_file = Path('mascs_data.parquet')
+sidecar_file = Path('mascs_data.cell-healpix_assignment-strict_nside-64_order-nested.parquet')
+
+# Sparse output
+sparse_out = generate_output_filename(input_file, sidecar_file)
+print(sparse_out.name)
+# mascs_data-aggregated.cell-healpix_assignment-strict_nside-64_order-nested.parquet
+
+# Densified output
+dense_out = generate_output_filename(input_file, sidecar_file, densified=True)
+print(dense_out.name)
+# mascs_data-aggregated-densified.cell-healpix_assignment-strict_nside-64_order-nested.parquet
+```
+
+---
+
+### extract_nside_from_filename
+
+Extract nside value from sidecar filename using regex.
+
+```python
+def extract_nside_from_filename(filename: str) -> Optional[int]
+```
+
+<ParamField path="filename" type="str" required>
+  Sidecar filename string
+</ParamField>
+
+<ResponseField name="return" type="Optional[int]">
+  nside value as integer, or None if not found/ambiguous
+</ResponseField>
+
+**Example:**
+```python
+from healpyxel.aggregate import extract_nside_from_filename
+
+nside = extract_nside_from_filename("data.nside-128.parquet")
+print(nside)  # 128
+```
+
+---
+
+### validate_sidecar_metadata
+
+Validate sidecar metadata file and check source_file match.
+
+```python
+def validate_sidecar_metadata(
+    sidecar_path: Path,
+    input_file: Path,
+    require_metadata: bool = False
+) -> Dict
+```
+
+<ParamField path="sidecar_path" type="Path" required>
+  Path to sidecar parquet file
+</ParamField>
+
+<ParamField path="input_file" type="Path" required>
+  Expected source input file path
+</ParamField>
+
+<ParamField path="require_metadata" type="bool" default="False">
+  If True, raise error when metadata missing
+</ParamField>
+
+<ResponseField name="return" type="Dict">
+  Dictionary with metadata (empty dict if not found and not required)
+</ResponseField>
+
+**Raises:**
+- `FileNotFoundError`: If require_metadata=True and .meta.json not found
+- `ValueError`: If source_file mismatch detected
+
+---
+
+### collect_sidecar_outputs
+
+Scan output_dir for sidecar parquet files that match the input file stem.
+
+```python
+def collect_sidecar_outputs(
+    input_parquet: Path,
+    output_dir: Path,
+    read_stats: bool = False
+) -> pd.DataFrame
+```
+
+<ParamField path="input_parquet" type="Path" required>
+  Path to the original parquet file
+</ParamField>
+
+<ParamField path="output_dir" type="Path" required>
+  Directory containing sidecar files
+</ParamField>
+
+<ParamField path="read_stats" type="bool" default="False">
+  If True, read files to compute row counts and unique healpix counts
+</ParamField>
+
+<ResponseField name="return" type="pd.DataFrame">
+  DataFrame with columns: file, coalesced, mode, nside, order, n_rows, n_unique_healpix
+</ResponseField>
+
+**Example:**
+```python
+from pathlib import Path
+from healpyxel.aggregate import collect_sidecar_outputs
+
+sidecars = collect_sidecar_outputs(
+    Path('data.parquet'),
+    Path('.'),
+    read_stats=True
+)
+
+print(sidecars[['nside', 'mode', 'n_rows']])
+```
+
+---
+
+## Display Functions
+
+### print_sidecar_summary
+
+Print a formatted summary table of available sidecar files.
+
+```python
+def print_sidecar_summary(
+    sidecars_df: pd.DataFrame,
+    input_file: Path
+) -> None
+```
+
+<ParamField path="sidecars_df" type="pd.DataFrame" required>
+  DataFrame from collect_sidecar_outputs()
+</ParamField>
+
+<ParamField path="input_file" type="Path" required>
+  Original input parquet file path
+</ParamField>
+
+---
+
+### print_parquet_schema
+
+Print the schema of a parquet file.
+
+```python
+def print_parquet_schema(
+    file_path: Path,
+    show_metadata: bool = True
+) -> None
+```
+
+<ParamField path="file_path" type="Path" required>
+  Path to the parquet file
+</ParamField>
+
+<ParamField path="show_metadata" type="bool" default="True">
+  Whether to display file metadata
+</ParamField>
+
+---
+
+## CLI Entry Point
+
+### main
+
+Main entry point for aggregate command.
+
+```python
+def main() -> int
+```
+
+**Command-line Usage:**
+```bash
+# Single sidecar aggregation
+healpyxel_aggregate \
+  -i data.parquet \
+  --sidecar-index 0 \
+  --aggregate \
+  --columns reflectance radiance \
+  --aggs mean median robust_std \
+  --min-count 2
+
+# Batch process all sidecars
+healpyxel_aggregate \
+  -i data.parquet \
+  --sidecar-index all \
+  --aggregate \
+  --columns value \
+  --densify \
+  -y
+```
+
+**Key Arguments:**
+- `--input`: Input parquet file with observational data
+- `--sidecar-index`: Sidecar selection (`all`, `0`, or list of indices)
+- `--aggregate`: Enable aggregation processing
+- `--columns`: Value columns to aggregate
+- `--aggs`: Aggregation functions
+- `--min-count`: Minimum observations per cell
+- `--densify`: Create full HEALPix grid
+- `--use-duckdb`: Use DuckDB for efficient loading
+- `--use-dask`: Use Dask for parallel aggregation
+
+**See Also:**
+- [Batch Processing Guide](/guides/batch-processing)
+- [CLI Reference](/cli/aggregate)

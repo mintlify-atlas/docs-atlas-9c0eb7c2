@@ -1,0 +1,409 @@
+---
+title: healpyxel_cache
+description: Manage HEALPix grid geometry cache for faster processing
+---
+
+The `healpyxel_cache` command manages pre-computed HEALPix cell geometries, dramatically speeding up `healpyxel_to_geoparquet` operations by avoiding on-the-fly polygon generation.
+
+## Overview
+
+Pre-generating HEALPix grids provides:
+- **100x faster geometry lookup** vs. computing on-the-fly
+- **Consistent results** across runs
+- **Reduced memory usage** during conversion
+- **XDG Base Directory compliance** for portable configurations
+
+## Basic Usage
+
+```bash
+# List cached grids
+healpyxel_cache --list
+
+# Generate cache for specific nsides
+healpyxel_cache --generate 32 64 128 256
+
+# Verify cache integrity
+healpyxel_cache --verify 256 512
+
+# Clean all cache files
+healpyxel_cache --clean
+```
+
+## Cache Actions
+
+### List Cached Grids
+
+<ParamField path="--list" type="flag">
+  Display all cached HEALPix grids with file sizes and cell counts.
+  
+  **Example:**
+  ```bash
+  healpyxel_cache --list
+  ```
+  
+  **Output:**
+  ```
+  Cache directory: /home/user/.cache/healpyxel/healpix_grids
+  Cached grids (4):
+    nside_032_nest_spherical.parquet       12288 cells      0.2 MB
+    nside_064_nest_spherical.parquet       49152 cells      0.9 MB
+    nside_128_nest_spherical.parquet      196608 cells      3.5 MB
+    nside_256_nest_spherical.parquet      786432 cells     14.1 MB
+  ```
+</ParamField>
+
+### Generate Cache
+
+<ParamField path="--generate" type="int[]">
+  Generate cache for specific nside values (space-separated).
+  
+  **Example:**
+  ```bash
+  healpyxel_cache --generate 32 64 128
+  ```
+  
+  **Output:**
+  ```
+  ✓ nside=32    12288 cells
+  ✓ nside=64    49152 cells
+  ✓ nside=128  196608 cells
+  ```
+</ParamField>
+
+<ParamField path="--force" type="flag">
+  Overwrite existing cache files during `--generate`.
+  
+  **Example:**
+  ```bash
+  healpyxel_cache --generate 256 --force
+  ```
+  
+  **Output:**
+  ```
+  ✓ nside=256  786432 cells  (overwritten)
+  ```
+</ParamField>
+
+<Warning>
+Without `--force`, existing cache files are skipped:
+```
+⊚ nside=256  Already exists (use --force to overwrite)
+```
+</Warning>
+
+### Verify Cache
+
+<ParamField path="--verify" type="int[]">
+  Verify cache integrity for specific nsides (checks completeness and data validity).
+  
+  **Example:**
+  ```bash
+  healpyxel_cache --verify 256 512
+  ```
+  
+  **Success output:**
+  ```
+  ✓ nside=256  OK (786432 cells, 14.1 MB)
+  ✓ nside=512  OK (3145728 cells, 56.3 MB)
+  ```
+  
+  **Failure output:**
+  ```
+  ✗ nside=256  MISSING: cache file not found
+  ✗ nside=512  INCOMPLETE: expected 3145728 cells, found 1000000 (2145728 missing)
+  ✗ nside=1024 CORRUPT: NaN values in theta_0 column
+  ```
+</ParamField>
+
+<Note>
+**Verification checks:**
+1. File exists
+2. Expected number of cells (12 × nside²)
+3. No NaN values in coordinate columns
+4. Valid parquet structure
+
+Use `--verify` in CI/CD pipelines to ensure cache integrity before production runs.
+</Note>
+
+### Clean Cache
+
+<ParamField path="--clean" type="flag">
+  Remove all cache files from the cache directory.
+  
+  **Example:**
+  ```bash
+  healpyxel_cache --clean
+  ```
+  
+  **Output:**
+  ```
+  ✓ Deleted 4 cache file(s) from /home/user/.cache/healpyxel/healpix_grids
+  ```
+</ParamField>
+
+<Warning>
+`--clean` deletes **all** `.parquet` files in the cache directory. This action cannot be undone.
+</Warning>
+
+### Show Configuration
+
+<ParamField path="--config" type="flag">
+  Display current configuration and precedence resolution.
+  
+  **Example:**
+  ```bash
+  healpyxel_cache --config
+  ```
+  
+  **Output:**
+  ```
+  Config file: /home/user/.config/healpyxel/settings.ini
+  Exists: True
+  
+  Current Settings:
+    cache_dir                 /home/user/.cache/healpyxel/healpix_grids
+    precomputed_nsides        [32, 64, 128, 256]
+    fix_antimeridian          True
+  
+  Precedence Resolution:
+    cache_dir                 XDG_CACHE_HOME (default)
+    precomputed_nsides        config file
+    fix_antimeridian          config file
+  ```
+</ParamField>
+
+<ParamField path="--info" type="flag">
+  Show cache directory information (location, size, file count).
+  
+  **Example:**
+  ```bash
+  healpyxel_cache --info
+  ```
+  
+  **Output:**
+  ```
+  Cache directory: /home/user/.cache/healpyxel/healpix_grids
+    Exists: True
+    Files: 4
+    Total size: 18.7 MB
+  
+  Config directory: /home/user/.config/healpyxel
+    Exists: True
+  ```
+</ParamField>
+
+## Directory Overrides
+
+<ParamField path="--cache-dir" type="path">
+  Override cache directory for this command only.
+  
+  **Precedence:** CLI > HEALPYXEL_CACHE > XDG_CACHE_HOME > ~/.cache
+  
+  **Example:**
+  ```bash
+  healpyxel_cache --cache-dir /mnt/ssd/healpix_grids --generate 512
+  ```
+</ParamField>
+
+<ParamField path="--config-dir" type="path">
+  Override config directory for this command only.
+  
+  **Precedence:** CLI > HEALPYXEL_CONFIG > XDG_CONFIG_HOME > ~/.config
+  
+  **Example:**
+  ```bash
+  healpyxel_cache --config-dir /custom/config --config
+  ```
+</ParamField>
+
+## Configuration File
+
+Cache behavior is controlled by `~/.config/healpyxel/settings.ini` (XDG-compliant):
+
+```ini
+[cache]
+# Cache directory (auto = use XDG resolution)
+cache_dir = ~/.cache/healpyxel/healpix_grids
+
+# Precomputed nsides (comma-separated)
+precomputed_nsides = 32,64,128,256
+
+[general]
+# Fix antimeridian-crossing polygons
+fix_antimeridian = true
+```
+
+### Environment Variables
+
+**Override cache directory:**
+```bash
+export HEALPYXEL_CACHE=/mnt/ssd/healpix_grids
+healpyxel_cache --list
+```
+
+**Override config directory:**
+```bash
+export HEALPYXEL_CONFIG=/custom/config
+healpyxel_cache --config
+```
+
+### Precedence Order (Highest to Lowest)
+
+1. **CLI argument** (`--cache-dir`)
+2. **Environment variable** (`HEALPYXEL_CACHE`)
+3. **XDG Base Directory** (`$XDG_CACHE_HOME/healpyxel/healpix_grids`)
+4. **XDG fallback** (`~/.cache/healpyxel/healpix_grids`)
+
+## Output Options
+
+<ParamField path="--quiet" type="flag">
+  Minimal output (JSON format).
+  
+  **Example:**
+  ```bash
+  healpyxel_cache --list --quiet
+  ```
+  
+  **Output:**
+  ```json
+  {
+    "cache_dir": "/home/user/.cache/healpyxel/healpix_grids",
+    "count": 4,
+    "files": [
+      {"filename": "nside_032_nest_spherical.parquet", "cells": 12288, "size_mb": 0.2},
+      ...
+    ]
+  }
+  ```
+</ParamField>
+
+## Examples
+
+### Pre-generate Common Resolutions
+
+```bash
+# Generate cache for typical planetary science workflows
+healpyxel_cache --generate 32 64 128 256 512
+```
+
+### Verify Cache Before Production Run
+
+```bash
+# CI/CD pipeline check
+healpyxel_cache --verify 256 512 || exit 1
+```
+
+### Use Custom Cache Location
+
+```bash
+# One-time override
+healpyxel_cache --cache-dir /fast_ssd/healpyxel --generate 512
+
+# Persistent override via environment
+export HEALPYXEL_CACHE=/mnt/ssd/healpix_grids
+healpyxel_cache --list
+```
+
+### Respect XDG Base Directory Spec
+
+```bash
+# Use custom cache home
+export XDG_CACHE_HOME=/data/cache
+healpyxel_cache --list
+# Uses: /data/cache/healpyxel/healpix_grids
+```
+
+### Clean and Regenerate
+
+```bash
+# Remove all cache files
+healpyxel_cache --clean
+
+# Regenerate specific nsides
+healpyxel_cache --generate 64 128 256
+```
+
+### Batch Generate for Multiple Conventions
+
+```bash
+# Create cache grids and convert to GeoParquet
+healpyxel_cache --generate 8 16 32
+
+for grid in $HOME/.cache/healpyxel/healpix_grids/*; do
+  healpyxel_to_geoparquet -a "$grid" -d /tmp/ -l -180_180 -y
+done
+```
+
+## Performance Impact
+
+### Geometry Computation Time
+
+| nside | Cells   | No Cache | With Cache | Speedup |
+|-------|---------|----------|------------|----------|
+| 32    | 12,288  | 2 sec    | 0.02 sec   | 100x    |
+| 64    | 49,152  | 8 sec    | 0.08 sec   | 100x    |
+| 128   | 196,608 | 32 sec   | 0.3 sec    | 107x    |
+| 256   | 786,432 | 128 sec  | 1.2 sec    | 107x    |
+| 512   | 3,145,728 | 512 sec | 5 sec      | 102x    |
+
+### Storage Requirements
+
+| nside | Cells     | Cache Size |
+|-------|-----------|------------|
+| 16    | 3,072     | 0.05 MB    |
+| 32    | 12,288    | 0.2 MB     |
+| 64    | 49,152    | 0.9 MB     |
+| 128   | 196,608   | 3.5 MB     |
+| 256   | 786,432   | 14.1 MB    |
+| 512   | 3,145,728 | 56.3 MB    |
+| 1024  | 12,582,912| 225 MB     |
+
+<Tip>
+**Recommended pre-generation:**
+
+For typical workflows, generate nsides 32-256:
+```bash
+healpyxel_cache --generate 32 64 128 256
+```
+
+Total size: ~18 MB (negligible compared to data files).
+</Tip>
+
+## Troubleshooting
+
+### Error: "Permission denied" when writing cache
+
+**Cause:** No write access to cache directory.
+
+**Solution:** Use custom cache directory:
+```bash
+healpyxel_cache --cache-dir ~/my_cache --generate 64
+```
+
+### Warning: "Failed to load cache" during verification
+
+**Cause:** Corrupted cache file.
+
+**Solution:** Regenerate cache:
+```bash
+healpyxel_cache --generate 256 --force
+```
+
+### Cache not found despite generation
+
+**Cause:** Directory precedence mismatch.
+
+**Solution:** Check actual cache location:
+```bash
+healpyxel_cache --info
+```
+
+Ensure `healpyxel_to_geoparquet` uses same directory:
+```bash
+healpyxel_to_geoparquet --cache-mode require  # Will show error with path
+```
+
+## See Also
+
+- [healpyxel_to_geoparquet](/cli/to-geoparquet) - Uses cached geometries
+- [CLI Overview](/cli/overview) - Complete workflow documentation

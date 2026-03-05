@@ -1,0 +1,405 @@
+---
+title: "Sidecar API"
+description: "Create HEALPix sidecar mappings from geospatial data"
+---
+
+## Overview
+
+The sidecar module creates lightweight index-aside files that map source geometries to HEALPix cells. This is the first step in the HEALPyxel workflow.
+
+## Core Functions
+
+### compute_healpix_ids_from_lonlat
+
+Compute HEALPix indices for arrays of lon/lat coordinates.
+
+```python
+def compute_healpix_ids_from_lonlat(
+    nside: int,
+    lons: np.ndarray,
+    lats: np.ndarray
+) -> np.ndarray
+```
+
+<ParamField path="nside" type="int" required>
+  HEALPix nside parameter (must be power of 2)
+</ParamField>
+
+<ParamField path="lons" type="np.ndarray" required>
+  Longitude values in degrees
+</ParamField>
+
+<ParamField path="lats" type="np.ndarray" required>
+  Latitude values in degrees
+</ParamField>
+
+<ResponseField name="return" type="np.ndarray">
+  1D integer array of HEALPix indices (same length as inputs)
+</ResponseField>
+
+**Implementation Notes:**
+- Tries to use `healpy` if available, otherwise falls back to `cdshealpix`
+- Normalizes longitudes to [0, 360) internally
+- Returns empty array if input is empty
+
+**Example:**
+```python
+import numpy as np
+from healpyxel.sidecar import compute_healpix_ids_from_lonlat
+
+lons = np.array([0.0, 45.0, 90.0])
+lats = np.array([0.0, 30.0, -30.0])
+hpix = compute_healpix_ids_from_lonlat(64, lons, lats)
+print(hpix)  # Array of HEALPix cell IDs
+```
+
+---
+
+### detect_lonlat_columns
+
+Auto-detect longitude and latitude columns from a GeoDataFrame.
+
+```python
+def detect_lonlat_columns(
+    gdf_sample
+) -> tuple[str | None, str | None]
+```
+
+<ParamField path="gdf_sample" type="GeoDataFrame" required>
+  Sample GeoDataFrame to inspect for coordinate columns
+</ParamField>
+
+<ResponseField name="return" type="tuple">
+  Tuple of (lon_column, lat_column) or (None, None) if not found
+</ResponseField>
+
+**Recognized Patterns:**
+- Longitude: `lon`, `longitude`, `long`, `x`, `easting`
+- Latitude: `lat`, `latitude`, `y`, `northing`
+- Pattern matching is case-insensitive
+
+**Example:**
+```python
+import geopandas as gpd
+from healpyxel.sidecar import detect_lonlat_columns
+
+gdf = gpd.read_file('data.parquet')
+lon_col, lat_col = detect_lonlat_columns(gdf)
+if lon_col and lat_col:
+    print(f"Found coordinates: {lon_col}, {lat_col}")
+```
+
+---
+
+### compute_geo_statistics
+
+Compute geographical statistics for a GeoParquet file using DuckDB for efficiency.
+
+```python
+def compute_geo_statistics(
+    input_path: Path,
+    lon_col: str | None = None,
+    lat_col: str | None = None,
+    sample_size: int = 10000,
+    lon_convention: str | None = None
+) -> dict
+```
+
+<ParamField path="input_path" type="Path" required>
+  Path to input GeoParquet file
+</ParamField>
+
+<ParamField path="lon_col" type="str" default="None">
+  Longitude column name (auto-detected if None)
+</ParamField>
+
+<ParamField path="lat_col" type="str" default="None">
+  Latitude column name (auto-detected if None)
+</ParamField>
+
+<ParamField path="sample_size" type="int" default="10000">
+  Number of rows to sample for geometry-based extraction
+</ParamField>
+
+<ParamField path="lon_convention" type="str" default="None">
+  Longitude convention for filtering: `'0_360'` for [0,360) or `'minus_plus180'` for [-180,180)
+</ParamField>
+
+<ResponseField name="return" type="dict">
+  Statistics dictionary with keys: `lon`, `lat`, `source`, `lon_col`, `lat_col`, `filtered`, `total_count`, `filtered_count`
+</ResponseField>
+
+**Example:**
+```python
+from pathlib import Path
+from healpyxel.sidecar import compute_geo_statistics
+
+stats = compute_geo_statistics(
+    Path('data.parquet'),
+    lon_convention='0_360'
+)
+
+print(f"Lon range: [{stats['lon']['min']}, {stats['lon']['max']}]")
+print(f"Lat range: [{stats['lat']['min']}, {stats['lat']['max']}]")
+print(f"Total records: {stats['filtered_count']}")
+```
+
+---
+
+### process_partition
+
+Process a single dask partition and return DataFrame of HEALPix assignments.
+
+```python
+def process_partition(
+    gdf,
+    nside: int,
+    mode: str,
+    base_index: int | None = None,
+    lon_convention: str = 'minus_plus180',
+    lon_col: str | None = None,
+    lat_col: str | None = None,
+    data_psf=None,
+    cell_psf=None,
+    combine_method='multiply'
+) -> pd.DataFrame
+```
+
+<ParamField path="gdf" type="GeoDataFrame" required>
+  GeoDataFrame or DataFrame partition to process
+</ParamField>
+
+<ParamField path="nside" type="int" required>
+  HEALPix nside parameter
+</ParamField>
+
+<ParamField path="mode" type="str" required>
+  Assignment mode: `'strict'` (single-cell only) or `'fuzzy'` (all cells touched)
+</ParamField>
+
+<ParamField path="base_index" type="int" default="None">
+  Base index for global source_id generation
+</ParamField>
+
+<ParamField path="lon_convention" type="str" default="'minus_plus180'">
+  Longitude convention: `'minus_plus180'` or `'0_360'`
+</ParamField>
+
+<ParamField path="lon_col" type="str" default="None">
+  Longitude column name (uses geometry if None)
+</ParamField>
+
+<ParamField path="lat_col" type="str" default="None">
+  Latitude column name (uses geometry if None)
+</ParamField>
+
+<ParamField path="data_psf" type="callable" default="None">
+  Optional point spread function for data
+</ParamField>
+
+<ParamField path="cell_psf" type="callable" default="None">
+  Optional point spread function for cells
+</ParamField>
+
+<ParamField path="combine_method" type="str" default="'multiply'">
+  How to combine PSF weights: `'multiply'`, `'sum'`, `'min'`, or `'max'`
+</ParamField>
+
+<ResponseField name="return" type="pd.DataFrame">
+  DataFrame with columns: `source_id`, `healpix_id`, and optional `weight`
+</ResponseField>
+
+**Workflow Support:**
+1. **Scalar lon/lat columns** (efficient for strict mode): Pass `lon_col` and `lat_col`
+2. **Geometry-based** (for fuzzy mode): Pass geometries via `gdf.geometry`
+
+**Example:**
+```python
+import geopandas as gpd
+from healpyxel.sidecar import process_partition
+
+gdf = gpd.read_file('observations.parquet')
+result = process_partition(
+    gdf,
+    nside=128,
+    mode='fuzzy',
+    lon_convention='0_360'
+)
+
+print(f"Assignments: {len(result)} rows")
+print(result.head())
+```
+
+---
+
+### build_output_path
+
+Build output path for sidecar file based on input and parameters.
+
+```python
+def build_output_path(
+    input_path: Path,
+    mode: str,
+    nside: int
+) -> Path
+```
+
+<ParamField path="input_path" type="Path" required>
+  Input file path
+</ParamField>
+
+<ParamField path="mode" type="str" required>
+  Assignment mode: `'strict'` or `'fuzzy'`
+</ParamField>
+
+<ParamField path="nside" type="int" required>
+  HEALPix nside parameter
+</ParamField>
+
+<ResponseField name="return" type="Path">
+  Output path with standardized naming convention
+</ResponseField>
+
+**Naming Convention:**
+```
+{stem}.cell-healpix_assignment-{mode}_nside-{nside}_order-nested.parquet
+```
+
+**Example:**
+```python
+from pathlib import Path
+from healpyxel.sidecar import build_output_path
+
+input_path = Path('mascs_data.parquet')
+output = build_output_path(input_path, mode='fuzzy', nside=64)
+print(output)
+# mascs_data.cell-healpix_assignment-fuzzy_nside-64_order-nested.parquet
+```
+
+---
+
+## Point Spread Functions
+
+### PSF Base Class
+
+```python
+class PSF:
+    def __init__(self):
+        pass
+    
+    def __call__(self, dx, dy):
+        raise NotImplementedError
+```
+
+### GaussianPSF
+
+2D Gaussian point spread function centered at (0,0).
+
+```python
+class GaussianPSF(PSF):
+    def __init__(self, sigma=None):
+        super().__init__()
+        self.sigma = sigma
+    
+    def __call__(self, dx, dy):
+        if self.sigma is None:
+            raise ValueError("Sigma must be set for GaussianPSF.")
+        r2 = dx**2 + dy**2
+        return np.exp(-0.5 * r2 / (self.sigma**2))
+```
+
+<ParamField path="sigma" type="float" required>
+  Standard deviation of the Gaussian kernel
+</ParamField>
+
+**Example:**
+```python
+from healpyxel.sidecar import GaussianPSF
+
+psf = GaussianPSF(sigma=0.5)
+weight = psf(0.1, 0.2)  # Evaluate at offset (0.1, 0.2)
+print(f"PSF weight: {weight}")
+```
+
+### get_psf
+
+Factory function to create PSF instances.
+
+```python
+def get_psf(psf_type, sigma=None)
+```
+
+<ParamField path="psf_type" type="str" required>
+  PSF type: `'gaussian'` or `'none'`
+</ParamField>
+
+<ParamField path="sigma" type="float" default="None">
+  Sigma parameter for Gaussian PSF
+</ParamField>
+
+<ResponseField name="return" type="callable">
+  PSF function or lambda
+</ResponseField>
+
+---
+
+## Validation Functions
+
+### validate_nside
+
+Validate that nside is a positive power of two.
+
+```python
+def validate_nside(nside: int) -> bool
+```
+
+<ParamField path="nside" type="int" required>
+  HEALPix nside value to validate
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  True if valid, False otherwise
+</ResponseField>
+
+**Example:**
+```python
+from healpyxel.sidecar import validate_nside
+
+print(validate_nside(64))   # True
+print(validate_nside(128))  # True
+print(validate_nside(100))  # False (not power of 2)
+```
+
+---
+
+## CLI Entry Point
+
+### main
+
+Main entry point for HEALPix sidecar generation.
+
+```python
+def main(argv=None)
+```
+
+**Command-line Usage:**
+```bash
+healpyxel_sidecar \
+  --input data.parquet \
+  --nside 64 128 \
+  --mode fuzzy \
+  --lon-convention 0_360 \
+  --ncores 8
+```
+
+**Key Arguments:**
+- `--input`: Input GeoParquet file
+- `--nside`: One or more HEALPix nside values
+- `--mode`: Assignment mode (`strict` or `fuzzy`)
+- `--lon-convention`: Longitude convention (`0_360` or `minus_plus180`)
+- `--geo-stats`: Compute geographical statistics before processing
+- `--ncores`: Number of CPU cores to use
+
+**See Also:**
+- [Batch Processing Guide](/guides/batch-processing)
+- [CLI Reference](/cli/sidecar)

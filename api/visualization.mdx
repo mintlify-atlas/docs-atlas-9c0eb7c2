@@ -1,0 +1,332 @@
+---
+title: "Visualization API"
+description: "Prepare HEALPix maps for visualization with matplotlib and healpy"
+---
+
+## Overview
+
+The visualization module provides utilities to prepare HEALPix map arrays for plotting with matplotlib, healpy, and other visualization libraries.
+
+## Core Functions
+
+### prepare_healpix_map
+
+Prepare a HEALPix map array and ScalarMappable for plotting.
+
+```python
+def prepare_healpix_map(
+    aggregated_dense: pd.DataFrame,
+    output_column: str = 'r1050_median',
+    equalize: bool = True,
+    percentile_cutoff: Optional[Union[float, Tuple[float, float]]] = None,
+    cmap: str = 'Spectral_r'
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, cm.ScalarMappable]
+```
+
+<ParamField path="aggregated_dense" type="pd.DataFrame" required>
+  Dense HEALPix aggregated DataFrame (from densify_healpix_aggregates)
+</ParamField>
+
+<ParamField path="output_column" type="str" default="'r1050_median'">
+  Column name to visualize
+</ParamField>
+
+<ParamField path="equalize" type="bool" default="True">
+  Apply histogram equalization for contrast enhancement
+</ParamField>
+
+<ParamField path="percentile_cutoff" type="Union[float, Tuple[float, float]]" default="None">
+  Percentile clipping:
+  - Single number (e.g., `5`): clip at [5%, 95%]
+  - Tuple (e.g., `(2, 98)`): clip at [2%, 98%]
+  - `None` or `False`: no clipping
+</ParamField>
+
+<ParamField path="cmap" type="str" default="'Spectral_r'">
+  Matplotlib colormap name
+</ParamField>
+
+<ResponseField name="return" type="Tuple">
+  Tuple of:
+  - `healpix_map` (np.ndarray): Processed HEALPix map array (float64, length=npix)
+  - `valid_pixels` (np.ndarray): Boolean mask of valid (non-NaN) pixels
+  - `invalid_pixels` (np.ndarray): Boolean mask of invalid (NaN) pixels
+  - `mappable` (cm.ScalarMappable): ScalarMappable configured with original data range for colorbars
+</ResponseField>
+
+**Processing Steps:**
+1. Extract specified column as numpy array
+2. Optionally apply histogram equalization (enhances contrast)
+3. Optionally clip extreme values using percentiles
+4. Create ScalarMappable with original data range for colorbars
+
+**Example:**
+```python
+import numpy as np
+import pandas as pd
+import healpy as hp
+import matplotlib.pyplot as plt
+from healpyxel.visualization import prepare_healpix_map
+from healpyxel.aggregate import densify_healpix_aggregates
+
+# Load sparse aggregation
+sparse_df = pd.read_parquet('month01_aggregated.parquet')
+
+# Densify to full grid
+nside = 256
+dense_df = densify_healpix_aggregates(sparse_df, nside)
+
+# Prepare for visualization
+healpix_map, valid, invalid, mappable = prepare_healpix_map(
+    aggregated_dense=dense_df,
+    output_column='r750_mean',
+    equalize=True,
+    percentile_cutoff=5,  # Clip at 5% and 95%
+    cmap='viridis'
+)
+
+# Plot with healpy
+hp.mollview(
+    healpix_map,
+    title='R750 Mean Reflectance',
+    cmap='viridis',
+    nest=True
+)
+
+# Add colorbar using mappable
+plt.colorbar(mappable, label='Reflectance', orientation='horizontal', shrink=0.8)
+plt.show()
+```
+
+---
+
+## Usage Patterns
+
+### Basic Visualization
+
+```python
+from healpyxel.visualization import prepare_healpix_map
+import healpy as hp
+import matplotlib.pyplot as plt
+
+# Prepare map without equalization
+healpix_map, valid, invalid, mappable = prepare_healpix_map(
+    aggregated_dense,
+    output_column='temperature',
+    equalize=False
+)
+
+# Mollweide projection
+hp.mollview(healpix_map, title='Temperature', nest=True)
+plt.colorbar(mappable, label='K', orientation='horizontal')
+plt.show()
+```
+
+---
+
+### Custom Percentile Clipping
+
+```python
+from healpyxel.visualization import prepare_healpix_map
+
+# Symmetric clipping (5% and 95%)
+healpix_map, valid, invalid, mappable = prepare_healpix_map(
+    aggregated_dense,
+    output_column='r1050_median',
+    percentile_cutoff=5
+)
+
+# Asymmetric clipping (2% and 98%)
+healpix_map, valid, invalid, mappable = prepare_healpix_map(
+    aggregated_dense,
+    output_column='r1050_median',
+    percentile_cutoff=(2, 98)
+)
+```
+
+---
+
+### Multiple Subplots
+
+```python
+import matplotlib.pyplot as plt
+import healpy as hp
+from healpyxel.visualization import prepare_healpix_map
+
+fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+columns = ['r750_mean', 'r750_median', 'r750_std', 'r750_robust_std']
+titles = ['Mean', 'Median', 'Std Dev', 'Robust Std Dev']
+
+for ax, col, title in zip(axes.flat, columns, titles):
+    healpix_map, valid, invalid, mappable = prepare_healpix_map(
+        aggregated_dense,
+        output_column=col,
+        equalize=True,
+        cmap='RdYlBu_r'
+    )
+    
+    hp.mollview(
+        healpix_map,
+        title=f'R750 {title}',
+        cmap='RdYlBu_r',
+        nest=True,
+        hold=True,
+        sub=(2, 2, list(axes.flat).index(ax) + 1)
+    )
+    plt.colorbar(mappable, ax=ax, orientation='horizontal', shrink=0.8)
+
+plt.tight_layout()
+plt.show()
+```
+
+---
+
+### Advanced: Masking Invalid Regions
+
+```python
+import numpy as np
+import numpy.ma as ma
+import healpy as hp
+from healpyxel.visualization import prepare_healpix_map
+
+healpix_map, valid, invalid, mappable = prepare_healpix_map(
+    aggregated_dense,
+    output_column='r750_mean'
+)
+
+# Create masked array (hide invalid pixels)
+masked_map = ma.masked_where(invalid, healpix_map)
+
+# Plot with custom bad pixel color
+hp.mollview(
+    masked_map,
+    title='R750 Mean (masked)',
+    cmap='viridis',
+    nest=True,
+    badcolor='gray'
+)
+plt.show()
+```
+
+---
+
+## Integration with Other Libraries
+
+### healpy
+
+The output is directly compatible with healpy visualization functions:
+
+```python
+import healpy as hp
+from healpyxel.visualization import prepare_healpix_map
+
+healpix_map, valid, invalid, mappable = prepare_healpix_map(
+    aggregated_dense,
+    output_column='value'
+)
+
+# Mollweide projection
+hp.mollview(healpix_map, nest=True)
+
+# Orthographic projection
+hp.orthview(healpix_map, nest=True, rot=[0, 0, 0])
+
+# Cartesian projection
+hp.cartview(healpix_map, nest=True, lonra=[-180, 180], latra=[-90, 90])
+
+# Gnomonic projection (zoomed region)
+hp.gnomview(healpix_map, nest=True, rot=[0, 0], xsize=500, reso=1.0)
+```
+
+---
+
+### skyproj
+
+For planetary science visualizations:
+
+```python
+import skyproj
+from healpyxel.visualization import prepare_healpix_map
+
+healpix_map, valid, invalid, mappable = prepare_healpix_map(
+    aggregated_dense,
+    output_column='temperature',
+    cmap='plasma'
+)
+
+# Create planetarium-style projection
+fig, ax = plt.subplots(figsize=(10, 8))
+ax = skyproj.McBrydeSkyproj(ax=ax)
+ax.draw_hpxmap(healpix_map, nest=True, cmap='plasma')
+ax.set_title('Mercury Surface Temperature')
+plt.colorbar(mappable, ax=ax, label='K')
+plt.show()
+```
+
+---
+
+## Colormap Recommendations
+
+### Scientific Data
+
+- **Sequential**: `'viridis'`, `'plasma'`, `'inferno'`, `'cividis'`
+- **Diverging**: `'RdBu_r'`, `'RdYlBu_r'`, `'coolwarm'`
+- **Perceptually uniform**: `'viridis'`, `'cividis'`
+
+### Planetary Surfaces
+
+- **Reflectance**: `'gray'`, `'bone'`, `'Greys'`
+- **Temperature**: `'hot'`, `'plasma'`, `'inferno'`
+- **Elevation**: `'terrain'`, `'gist_earth'`
+- **Composition**: `'Spectral_r'`, `'nipy_spectral'`
+
+**Example:**
+```python
+# Temperature map
+healpix_map, valid, invalid, mappable = prepare_healpix_map(
+    aggregated_dense,
+    output_column='temperature',
+    cmap='inferno'
+)
+
+# Elevation map
+healpix_map, valid, invalid, mappable = prepare_healpix_map(
+    aggregated_dense,
+    output_column='elevation',
+    cmap='terrain'
+)
+
+# Reflectance map
+healpix_map, valid, invalid, mappable = prepare_healpix_map(
+    aggregated_dense,
+    output_column='albedo',
+    cmap='gray'
+)
+```
+
+---
+
+## Requirements
+
+The visualization module requires:
+
+- **Core**: `numpy`, `pandas`
+- **Visualization**: `matplotlib`
+- **Image processing**: `scikit-image` (for histogram equalization)
+- **HEALPix plotting**: `healpy` (optional but recommended)
+- **Advanced projections**: `skyproj` (optional)
+
+**Installation:**
+```bash
+pip install numpy pandas matplotlib scikit-image healpy skyproj
+```
+
+---
+
+## See Also
+
+- [Visualization Guide](/guides/visualization)
+- [healpy Documentation](https://healpy.readthedocs.io/)
+- [skyproj Documentation](https://skyproj.readthedocs.io/)
+- [Matplotlib Colormaps](https://matplotlib.org/stable/tutorials/colors/colormaps.html)

@@ -1,0 +1,514 @@
+---
+title: 'Visualization Workflows'
+description: 'Create publication-quality global maps from HEALPix aggregated data'
+---
+
+## Overview
+
+HEALPyxel provides flexible visualization tools for creating global maps from aggregated HEALPix data. You can:
+
+- Generate publication-ready figures with matplotlib/cartopy
+- Export interactive maps with skyproj (Mollweide, Orthographic projections)
+- Apply contrast enhancement and percentile clipping
+- Handle antimeridian-crossing cells correctly
+- Integrate with standard GIS software (QGIS, ArcGIS)
+
+## Visualization Workflow
+
+<Steps>
+  <Step title="Prepare HEALPix Map">
+    Convert aggregated DataFrame to numpy array with preprocessing
+  </Step>
+  
+  <Step title="Apply Enhancements">
+    Histogram equalization, percentile clipping, colormap selection
+  </Step>
+  
+  <Step title="Render to Projection">
+    Display on global projection or export to file
+  </Step>
+</Steps>
+
+## Python API for Visualization
+
+### Basic Map Preparation
+
+The `prepare_healpix_map()` function handles common visualization preprocessing:
+
+```python
+from healpyxel.visualization import prepare_healpix_map
+import pandas as pd
+
+# Load aggregated data (from healpyxel_aggregate)
+agg_df = pd.read_parquet('observations-aggregated-densified.parquet')
+
+# Prepare for visualization
+healpix_map, valid_pixels, invalid_pixels, mappable = prepare_healpix_map(
+    aggregated_dense=agg_df,
+    output_column='r1050_median',
+    equalize=True,              # Histogram equalization
+    percentile_cutoff=5,        # Clip at 5th and 95th percentiles
+    cmap='Spectral_r'
+)
+
+print(f"Valid pixels: {valid_pixels.sum()}")
+print(f"Data range: {healpix_map[valid_pixels].min():.3f} - {healpix_map[valid_pixels].max():.3f}")
+```
+
+**Function Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `aggregated_dense` | DataFrame | Dense HEALPix DataFrame (all npix cells) |
+| `output_column` | str | Column to visualize (e.g., 'r1050_median') |
+| `equalize` | bool | Apply histogram equalization (default: True) |
+| `percentile_cutoff` | float or tuple | Clip extreme values: 5 → [5%, 95%], (2, 98) → [2%, 98%] |
+| `cmap` | str | Matplotlib colormap name |
+
+**Returns:**
+- `healpix_map`: Preprocessed numpy array (npix,)
+- `valid_pixels`: Boolean mask for cells with data
+- `invalid_pixels`: Boolean mask for empty cells
+- `mappable`: ScalarMappable for colorbar (uses original data range)
+
+### Contrast Enhancement Options
+
+<CodeGroup>
+```python No Enhancement
+map_raw, valid, invalid, mappable = prepare_healpix_map(
+    agg_df,
+    output_column='r1050_median',
+    equalize=False,           # Disable equalization
+    percentile_cutoff=None    # No clipping
+)
+```
+
+```python Histogram Equalization Only
+map_eq, valid, invalid, mappable = prepare_healpix_map(
+    agg_df,
+    output_column='r1050_median',
+    equalize=True,
+    percentile_cutoff=None
+)
+```
+
+```python Percentile Clipping Only
+map_clipped, valid, invalid, mappable = prepare_healpix_map(
+    agg_df,
+    output_column='r1050_median',
+    equalize=False,
+    percentile_cutoff=5  # Clip outliers beyond 5th/95th percentile
+)
+```
+
+```python Both (Recommended)
+map_enhanced, valid, invalid, mappable = prepare_healpix_map(
+    agg_df,
+    output_column='r1050_median',
+    equalize=True,
+    percentile_cutoff=5
+)
+```
+</CodeGroup>
+
+<Note>
+  **Histogram equalization** is recommended for planetary reflectance data with wide dynamic range. It enhances subtle features without clipping data.
+</Note>
+
+## Matplotlib + Cartopy Visualization
+
+### Orthographic Projection (Hemisphere View)
+
+```python
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import healpy as hp
+import numpy as np
+
+# Prepare map
+healpix_map, valid, invalid, mappable = prepare_healpix_map(
+    agg_df,
+    output_column='r1050_median',
+    equalize=True,
+    percentile_cutoff=5,
+    cmap='Spectral_r'
+)
+
+# Extract nside from DataFrame length
+nside = hp.npix2nside(len(healpix_map))
+
+# Create figure with Orthographic projection
+fig = plt.figure(figsize=(10, 10))
+proj = ccrs.Orthographic(central_longitude=0, central_latitude=0)
+ax = fig.add_subplot(1, 1, 1, projection=proj)
+ax.set_global()
+
+# Convert HEALPix cells to polygons and plot
+for pix_id in np.where(valid)[0]:
+    # Get cell boundaries (4 corners)
+    corners = hp.boundaries(nside, pix_id, step=1, nest=True)
+    lons = np.degrees(np.arctan2(corners[1], corners[0]))
+    lats = 90 - np.degrees(np.arccos(corners[2]))
+    
+    # Plot polygon
+    ax.fill(lons, lats, 
+            color=mappable.to_rgba(healpix_map[pix_id]),
+            transform=ccrs.PlateCarree(),
+            edgecolor='none')
+
+# Add colorbar
+cbar = fig.colorbar(mappable, ax=ax, orientation='horizontal', 
+                    pad=0.05, shrink=0.8)
+cbar.set_label('Reflectance at 1050 nm (median)', fontsize=12)
+
+plt.title(f'Global Reflectance Map (nside={nside})', fontsize=14)
+plt.tight_layout()
+plt.savefig('mercury_reflectance_orthographic.png', dpi=300, bbox_inches='tight')
+plt.show()
+```
+
+### Mollweide Projection (Full Global View)
+
+```python
+import healpy as hp
+import matplotlib.pyplot as plt
+
+# Prepare map
+healpix_map, valid, invalid, mappable = prepare_healpix_map(
+    agg_df, 'r1050_median', equalize=True, percentile_cutoff=5
+)
+
+# Use healpy's built-in Mollweide projection
+hp.mollview(
+    healpix_map,
+    title='Mercury Reflectance at 1050 nm',
+    cmap='Spectral_r',
+    nest=True,           # NESTED ordering
+    cbar=True,
+    unit='Reflectance',
+    min=np.nanpercentile(healpix_map[valid], 5),
+    max=np.nanpercentile(healpix_map[valid], 95)
+)
+
+hp.graticule()  # Add grid lines
+plt.savefig('mercury_reflectance_mollweide.png', dpi=300, bbox_inches='tight')
+plt.show()
+```
+
+## Skyproj Integration
+
+Skyproj provides advanced projection support with better handling of HEALPix data:
+
+```python
+import skyproj
+import healpy as hp
+import numpy as np
+
+# Prepare map
+healpix_map, valid, invalid, mappable = prepare_healpix_map(
+    agg_df, 'r1050_median', equalize=True, cmap='viridis'
+)
+
+nside = hp.npix2nside(len(healpix_map))
+
+# Create McBryde projection (better area preservation)
+fig, ax = plt.subplots(figsize=(12, 6))
+sp = skyproj.McBrydeSkyproj(ax=ax)
+
+# Draw HEALPix map
+im = sp.draw_hpxmap(
+    healpix_map,
+    nest=True,
+    cmap='viridis',
+    vmin=np.nanpercentile(healpix_map[valid], 5),
+    vmax=np.nanpercentile(healpix_map[valid], 95)
+)
+
+sp.draw_inset_colorbar(im, label='Reflectance (1050 nm)')
+sp.draw_parallel(0, color='gray', linestyle='--', alpha=0.5)
+sp.draw_meridian(0, color='gray', linestyle='--', alpha=0.5)
+
+plt.title('Global Reflectance Mosaic', fontsize=14)
+plt.tight_layout()
+plt.savefig('mercury_skyproj.png', dpi=300, bbox_inches='tight')
+plt.show()
+```
+
+## GeoParquet for GIS Software
+
+### Export to QGIS/ArcGIS
+
+<Steps>
+  <Step title="Convert Aggregated Data to GeoParquet">
+    ```bash
+    healpyxel_to_geoparquet \
+      --aggregate-path observations-aggregated.parquet \
+      --output-dir output/ \
+      --lon-convention -180_180
+    ```
+  </Step>
+  
+  <Step title="Open in QGIS">
+    1. **Drag and drop** `.geo.parquet` file into QGIS
+    2. Right-click layer → **Properties** → **Symbology**
+    3. Choose **Graduated** renderer
+    4. Select column (e.g., `r1050_median`)
+    5. Choose color ramp (e.g., Spectral, inverted)
+    6. Click **Classify**
+  </Step>
+  
+  <Step title="Style and Export">
+    - Add hillshade/basemap
+    - Adjust transparency
+    - Export to PNG/PDF: **Project** → **Import/Export** → **Export Map to Image**
+  </Step>
+</Steps>
+
+### Python GeoDataFrame Visualization
+
+```python
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+
+# Load GeoParquet
+gdf = gpd.read_parquet('observations-aggregated.geo.parquet')
+
+# Plot with geopandas
+fig, ax = plt.subplots(figsize=(12, 8), 
+                       subplot_kw={'projection': ccrs.PlateCarree()})
+ax.set_global()
+
+gdf.plot(
+    column='r1050_median',
+    cmap='Spectral_r',
+    legend=True,
+    ax=ax,
+    edgecolor='none',
+    vmin=gdf['r1050_median'].quantile(0.05),
+    vmax=gdf['r1050_median'].quantile(0.95),
+    legend_kwds={'label': 'Reflectance at 1050 nm', 'shrink': 0.8}
+)
+
+ax.coastlines()  # Add reference features if available
+ax.gridlines(draw_labels=True)
+plt.title('Mercury Reflectance Distribution', fontsize=14)
+plt.tight_layout()
+plt.savefig('geopandas_map.png', dpi=300, bbox_inches='tight')
+plt.show()
+```
+
+## Multi-Band RGB Composites
+
+Create false-color composites from multiple spectral bands:
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+import healpy as hp
+
+# Prepare three bands
+red_band, _, _, _ = prepare_healpix_map(agg_df, 'r1050_median', equalize=True)
+green_band, _, _, _ = prepare_healpix_map(agg_df, 'r950_median', equalize=True)
+blue_band, valid, invalid, _ = prepare_healpix_map(agg_df, 'r750_median', equalize=True)
+
+# Stack into RGB array (normalize to [0, 1])
+rgb_map = np.zeros((len(red_band), 3))
+rgb_map[valid, 0] = (red_band[valid] - red_band[valid].min()) / (red_band[valid].max() - red_band[valid].min())
+rgb_map[valid, 1] = (green_band[valid] - green_band[valid].min()) / (green_band[valid].max() - green_band[valid].min())
+rgb_map[valid, 2] = (blue_band[valid] - blue_band[valid].min()) / (blue_band[valid].max() - blue_band[valid].min())
+
+# Set invalid pixels to black
+rgb_map[invalid] = [0, 0, 0]
+
+# Plot with healpy (requires RGB support)
+# Note: healpy's mollview doesn't support RGB directly, use cartographic projection:
+fig, ax = plt.subplots(figsize=(15, 8))
+nside = hp.npix2nside(len(red_band))
+
+# Convert HEALPix to lat/lon grid for imshow
+from healpy import get_interp_val
+lons = np.linspace(-180, 180, 720)
+lats = np.linspace(-90, 90, 360)
+lon_grid, lat_grid = np.meshgrid(lons, lats)
+
+# Interpolate RGB values
+rgb_grid = np.zeros((360, 720, 3))
+for i in range(3):
+    rgb_grid[:, :, i] = get_interp_val(
+        rgb_map[:, i], 
+        np.radians(90 - lat_grid.ravel()), 
+        np.radians(lon_grid.ravel()),
+        nest=True
+    ).reshape(360, 720)
+
+ax.imshow(rgb_grid, extent=[-180, 180, -90, 90], origin='lower', aspect='auto')
+ax.set_xlabel('Longitude', fontsize=12)
+ax.set_ylabel('Latitude', fontsize=12)
+ax.set_title('False-Color Composite (R: 1050 nm, G: 950 nm, B: 750 nm)', fontsize=14)
+plt.tight_layout()
+plt.savefig('rgb_composite.png', dpi=300, bbox_inches='tight')
+plt.show()
+```
+
+## Colormap Selection
+
+### Recommended Colormaps for Planetary Data
+
+<CardGroup cols={2}>
+  <Card title="Spectral_r">
+    **Use for:** Reflectance, albedo, composition maps
+    
+    **Pros:** Intuitive (red=high, blue=low), perceptually uniform
+  </Card>
+  
+  <Card title="viridis">
+    **Use for:** Elevation, temperature, continuous data
+    
+    **Pros:** Colorblind-safe, print-friendly, perceptually uniform
+  </Card>
+  
+  <Card title="RdYlBu_r">
+    **Use for:** Diverging data (anomalies, differences)
+    
+    **Pros:** Clear positive/negative distinction
+  </Card>
+  
+  <Card title="plasma">
+    **Use for:** High-contrast features, thermal data
+    
+    **Pros:** Good for projectors, colorblind-friendly
+  </Card>
+</CardGroup>
+
+```python
+# Test different colormaps
+for cmap_name in ['Spectral_r', 'viridis', 'plasma', 'RdYlBu_r']:
+    healpix_map, valid, invalid, mappable = prepare_healpix_map(
+        agg_df, 'r1050_median', equalize=True, cmap=cmap_name
+    )
+    
+    hp.mollview(healpix_map, title=f'Colormap: {cmap_name}', 
+                cmap=cmap_name, nest=True)
+    plt.savefig(f'map_{cmap_name}.png', dpi=150, bbox_inches='tight')
+    plt.close()
+```
+
+## Export Formats
+
+### High-Resolution PNG
+
+```python
+plt.savefig('mercury_map.png', 
+            dpi=300,              # Publication quality
+            bbox_inches='tight',  # Remove whitespace
+            facecolor='white')    # White background
+```
+
+### Vector PDF (for publications)
+
+```python
+plt.savefig('mercury_map.pdf', 
+            format='pdf',
+            bbox_inches='tight',
+            dpi=300)              # Raster elements at 300 DPI
+```
+
+### GeoTIFF (for GIS)
+
+```python
+from healpyxel.geospatial import export_healpix_to_geotiff
+
+export_healpix_to_geotiff(
+    df=agg_df,
+    column='r1050_median',
+    output_path='mercury_reflectance.tif',
+    nside=64,
+    order='nested',
+    crs='IAU:19900',  # Mercury IAU CRS
+    width=1440,       # 0.25° resolution
+    height=720
+)
+```
+
+## Complete Visualization Example
+
+```python
+#!/usr/bin/env python3
+"""Create publication-quality HEALPix map from aggregated data."""
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import healpy as hp
+import numpy as np
+from healpyxel.visualization import prepare_healpix_map
+
+# Configuration
+INPUT_FILE = 'observations-aggregated-densified.parquet'
+OUTPUT_COLUMN = 'r1050_median'
+OUTPUT_FILE = 'mercury_map_publication.png'
+
+# Load data
+print(f"Loading {INPUT_FILE}...")
+agg_df = pd.read_parquet(INPUT_FILE)
+nside = hp.npix2nside(len(agg_df))
+print(f"  nside={nside}, {len(agg_df)} cells")
+
+# Prepare map
+print("Preparing HEALPix map...")
+healpix_map, valid, invalid, mappable = prepare_healpix_map(
+    agg_df,
+    output_column=OUTPUT_COLUMN,
+    equalize=True,
+    percentile_cutoff=5,
+    cmap='Spectral_r'
+)
+
+print(f"  Valid cells: {valid.sum()} ({100*valid.sum()/len(valid):.1f}%)")
+print(f"  Data range: {healpix_map[valid].min():.4f} - {healpix_map[valid].max():.4f}")
+
+# Create figure
+fig = plt.figure(figsize=(12, 8), dpi=150)
+
+# Mollweide projection
+hp.mollview(
+    healpix_map,
+    fig=fig.number,
+    title=f'Mercury Surface Reflectance at 1050 nm (nside={nside})',
+    cmap='Spectral_r',
+    nest=True,
+    cbar=True,
+    unit='Reflectance',
+    min=np.nanpercentile(healpix_map[valid], 5),
+    max=np.nanpercentile(healpix_map[valid], 95),
+    hold=True
+)
+
+# Add grid
+hp.graticule(dpar=30, dmer=30, color='gray', alpha=0.3, linestyle='--')
+
+# Save
+print(f"Saving to {OUTPUT_FILE}...")
+plt.savefig(OUTPUT_FILE, dpi=300, bbox_inches='tight', facecolor='white')
+print("✓ Done!")
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Batch Processing" icon="layer-group" href="/guides/batch-processing">
+    Generate aggregated data for visualization
+  </Card>
+  
+  <Card title="GeoParquet Integration" icon="globe" href="/guides/geospatial">
+    Work with HEALPix data in GIS software
+  </Card>
+  
+  <Card title="Visualization API" icon="code" href="/api/visualization">
+    Complete function reference
+  </Card>
+  
+  <Card title="Example Workflow" icon="images" href="/examples/visualization-workflow">
+    Complete visualization workflow
+  </Card>
+</CardGroup>

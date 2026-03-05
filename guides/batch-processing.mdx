@@ -1,0 +1,328 @@
+---
+title: 'Batch Processing'
+description: 'Complete batch workflow for processing large planetary datasets with HEALPix aggregation'
+---
+
+## Overview
+
+The HEALPyxel batch processing workflow implements a **Split-Apply-Combine** pattern for processing large planetary science datasets. This approach allows you to:
+
+- Process terabyte-scale datasets without loading everything into memory
+- Aggregate sparse observations into equal-area HEALPix cells
+- Generate publication-ready global maps from irregular point data
+
+## The Split-Apply-Combine Pattern
+
+HEALPyxel's batch workflow consists of three core steps:
+
+<Steps>
+  <Step title="Split: Generate Sidecar Files">
+    Map each observation to HEALPix cells using `healpyxel_sidecar`
+  </Step>
+  
+  <Step title="Apply: Aggregate by Cell">
+    Compute statistics per cell using `healpyxel_aggregate`
+  </Step>
+  
+  <Step title="Combine: Export to GeoParquet">
+    Attach geometries for visualization with `healpyxel_to_geoparquet`
+  </Step>
+</Steps>
+
+![Pipeline End-to-End](~/workspace/source/Pipeline_End-to-End.svg)
+
+## Complete Batch Workflow
+
+This example processes a 50,000-observation sample dataset through the full pipeline.
+
+### Step 1: Generate HEALPix Sidecar
+
+The sidecar file creates a lightweight index mapping each observation to HEALPix cells.
+
+<CodeGroup>
+```bash CLI
+healpyxel_sidecar \
+  --input observations.parquet \
+  --nside 64 128 \
+  --mode fuzzy \
+  --output-dir output/
+```
+
+```python Python API
+from healpyxel import sidecar
+
+sidecar_df = sidecar.generate(
+    gdf,
+    nside=64,
+    mode="fuzzy",
+    order="nested",
+    lon_convention="0_360",
+)
+```
+</CodeGroup>
+
+**Key Parameters:**
+
+- `--nside`: Resolution (powers of 2). Multiple values generate multiple sidecars
+- `--mode fuzzy`: Assign observations to all cells they touch (recommended for footprints)
+- `--mode strict`: Assign only if fully contained within a cell
+- `--lon-convention`: `0_360` (default) or `-180_180`
+
+**Output:**
+```
+observations.cell-healpix_assignment-fuzzy_nside-64_order-nested.parquet
+observations.cell-healpix_assignment-fuzzy_nside-64_order-nested.meta.json
+observations.cell-healpix_assignment-fuzzy_nside-128_order-nested.parquet
+observations.cell-healpix_assignment-fuzzy_nside-128_order-nested.meta.json
+```
+
+<Accordion title="Sidecar File Structure">
+The sidecar contains only three columns:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `source_id` | int64 | Index from original data |
+| `healpix_id` | int64 | HEALPix cell ID (NESTED) |
+| `weight` | float64 | Fractional overlap (fuzzy mode) |
+
+For a 50k observation dataset with fuzzy mode:
+- **Unique sources:** 49,988
+- **Unique cells:** 10,860 (at nside=32)
+- **Total assignments:** 54,931 (some sources touch multiple cells)
+</Accordion>
+
+### Step 2: Aggregate Values by HEALPix Cell
+
+Compute per-cell statistics for your science columns.
+
+<CodeGroup>
+```bash Sparse Output
+healpyxel_aggregate \
+  --input observations.parquet \
+  --sidecar-dir output/ \
+  --sidecar-index 0 \
+  --aggregate \
+  --columns r750 r950 \
+  --aggs median robust_std \
+  --min-count 3
+```
+
+```bash Dense Output (with empty cells)
+healpyxel_aggregate \
+  --input observations.parquet \
+  --sidecar-dir output/ \
+  --sidecar-index all \
+  --aggregate \
+  --columns r1050 \
+  --aggs mean median std mad robust_std \
+  --densify
+```
+
+```python Python API
+from healpyxel import aggregate
+
+agg_df = aggregate.by_sidecar(
+    original=df,
+    sidecar=sidecar_df,
+    value_columns=["r750", "r950"],
+    aggs=["median", "robust_std"],
+    min_count=3,
+)
+```
+</CodeGroup>
+
+**Available Aggregation Functions:**
+
+| Function | Description | Use Case |
+|----------|-------------|----------|
+| `mean` | Arithmetic mean | General statistics |
+| `median` | 50th percentile | Robust central tendency |
+| `std` | Standard deviation | Variability measurement |
+| `min`, `max` | Extrema | Range detection |
+| `mad` | Median Absolute Deviation | Outlier-resistant spread |
+| `robust_std` | MAD × 1.4826 | Robust equivalent to std |
+
+<Note>
+  **Robust statistics** (`mad`, `robust_std`) are strongly recommended for planetary datasets with outliers from instrument noise or atmospheric effects.
+</Note>
+
+**Output Schema:**
+
+```python
+# Sparse output (10,860 cells with data)
+healpix_id | r1050_mean | r1050_median | r1050_std | r1050_mad | r1050_robust_std | n_sources
+-----------|------------|--------------|-----------|-----------|------------------|----------
+0          | 0.048616   | 0.047857     | 0.003759  | 0.002672  | 0.003962         | 4
+1          | 0.051467   | 0.052283     | 0.002976  | 0.001888  | 0.002799         | 6
+
+# Dense output (12,288 cells total, including empty)
+healpix_id | r1050_mean | r1050_median | r1050_std | n_sources
+-----------|------------|--------------|-----------|----------
+29         | 0.046644   | 0.046644     | 0.000000  | 1.0
+30         | NaN        | NaN          | NaN       | NaN       <- Empty cell
+31         | 0.040205   | 0.040986     | 0.009636  | 4.0
+```
+
+### Step 3: Convert to GeoParquet
+
+Add HEALPix cell geometries for visualization in QGIS, ArcGIS, or mapping libraries.
+
+<CodeGroup>
+```bash Single File
+healpyxel_to_geoparquet \
+  --aggregate-path output/observations-aggregated.parquet \
+  --output-dir output/ \
+  --lon-convention -180_180
+```
+
+```bash Batch Processing
+for f in output/*-aggregated*.parquet; do
+  healpyxel_to_geoparquet \
+    -a "$f" \
+    -d output/ \
+    -l -180_180 \
+    -f
+done
+```
+
+```python Python API
+from healpyxel.geospatial import healpix_to_geodataframe
+
+cells_gdf = healpix_to_geodataframe(
+    nside=64,
+    order="nested",
+    lon_convention="0_360",
+    pixels=agg_df["healpix_id"].to_numpy(),
+    fix_antimeridian=True,
+    cache_mode="use",
+).reset_index(drop=False)
+
+agg_geo_gdf = cells_gdf.merge(agg_df, on="healpix_id", how="left")
+```
+</CodeGroup>
+
+**Output:**
+```
+observations-aggregated.cell-healpix_assignment-fuzzy_nside-64.geo.parquet
+```
+
+This GeoParquet file can be directly imported into:
+- **QGIS** (Drag and drop)
+- **Python** (geopandas, dask-geopandas)
+- **R** (sf package)
+- **Web maps** (GeoJSON export)
+
+## Performance Tips
+
+### Memory Management
+
+<Accordion title="Processing Large Datasets">
+**For datasets > 10 GB:**
+
+1. **Use Dask partitioning** in sidecar generation:
+   ```bash
+   healpyxel_sidecar --input large.parquet --nside 128 \
+     --partition-size 5000000  # 5M rows per partition
+   ```
+
+2. **Process sidecars sequentially:**
+   ```bash
+   # Generate one nside at a time for TB-scale data
+   healpyxel_sidecar --input data.parquet --nside 256
+   healpyxel_aggregate --input data.parquet --sidecar-index 0 ...
+   
+   healpyxel_sidecar --input data.parquet --nside 512
+   healpyxel_aggregate --input data.parquet --sidecar-index 0 ...
+   ```
+
+3. **Use column filtering:**
+   ```bash
+   healpyxel_aggregate --input data.parquet \
+     --columns r1050  # Process only needed columns
+   ```
+</Accordion>
+
+### Choosing Resolution (nside)
+
+| nside | Cell Size (Mercury) | Cell Size (Moon) | Use Case |
+|-------|---------------------|------------------|----------|
+| 32    | 78 km               | 56 km            | Global overview maps |
+| 64    | 39 km               | 28 km            | Regional studies |
+| 128   | 19 km               | 14 km            | High-resolution mosaics |
+| 256   | 9.8 km              | 6.9 km           | Detailed analysis |
+| 512   | 4.9 km              | 3.5 km           | Native instrument resolution |
+
+<Note>
+  **Rule of thumb:** Choose nside where cell size ≈ 2-3× your typical footprint size. This balances spatial resolution with statistical robustness (multiple observations per cell).
+</Note>
+
+## Complete Example Script
+
+```bash
+#!/bin/bash
+# Complete HEALPyxel batch processing workflow
+
+INPUT="observations.parquet"
+OUTPUT_DIR="output"
+NSIDES=(64 128)  # Multiple resolutions
+
+# 1. Generate sidecar files
+healpyxel_sidecar \
+  --input "$INPUT" \
+  --nside ${NSIDES[@]} \
+  --mode fuzzy \
+  --output-dir "$OUTPUT_DIR"
+
+# 2. Aggregate with robust statistics
+healpyxel_aggregate \
+  --input "$INPUT" \
+  --sidecar-dir "$OUTPUT_DIR" \
+  --sidecar-index all \
+  --aggregate \
+  --columns r750 r950 r1050 \
+  --aggs median robust_std \
+  --min-count 3
+
+# 3. Generate dense versions for complete maps
+healpyxel_aggregate \
+  --input "$INPUT" \
+  --sidecar-dir "$OUTPUT_DIR" \
+  --sidecar-index all \
+  --aggregate \
+  --columns r1050 \
+  --aggs median \
+  --densify
+
+# 4. Convert all aggregated files to GeoParquet
+for agg_file in "$OUTPUT_DIR"/*-aggregated*.parquet; do
+  healpyxel_to_geoparquet \
+    --aggregate-path "$agg_file" \
+    --output-dir "$OUTPUT_DIR" \
+    --lon-convention -180_180 \
+    --force
+done
+
+echo "✓ Batch processing complete!"
+echo "  Output directory: $OUTPUT_DIR"
+echo "  Generated $(ls "$OUTPUT_DIR"/*.geo.parquet | wc -l) GeoParquet files"
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Streaming Workflow" icon="water" href="/guides/streaming">
+    Process incremental data without reprocessing archives
+  </Card>
+  
+  <Card title="Visualization" icon="map" href="/guides/visualization">
+    Create publication-quality maps from aggregated data
+  </Card>
+  
+  <Card title="GeoParquet Integration" icon="earth-americas" href="/guides/geospatial">
+    Work with HEALPix data in GIS software
+  </Card>
+  
+  <Card title="API Reference" icon="code" href="/api/aggregate">
+    Programmatic access to aggregation functions
+  </Card>
+</CardGroup>

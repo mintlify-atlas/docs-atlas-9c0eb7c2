@@ -1,0 +1,492 @@
+---
+title: 'Streaming Accumulation'
+description: 'Incremental data processing for ongoing missions and real-time map updates'
+---
+
+## Overview
+
+The streaming workflow enables **incremental updates** to global maps as new data arrives, without reprocessing entire archives. This is essential for:
+
+- **Ongoing planetary missions** receiving data daily/weekly
+- **Real-time map updates** showing latest coverage
+- **Versioned mosaics** tracking data evolution over mission timeline
+- **Memory-efficient processing** of multi-TB historical + new data
+
+<Note>
+  **Status:** Streaming features are in active development. Core functionality (accumulator + finalize) is stable. Advanced features (percentile tracking, data filtering) are experimental.
+</Note>
+
+## How Streaming Works
+
+Instead of recomputing statistics from scratch, the accumulator maintains **running state** for each HEALPix cell:
+
+```python
+for batch in mission_data:
+    state = update_state(batch, sidecar, state)  # Incremental update
+    save_state(state, f"state_v{version}.parquet")
+```
+
+The state tracks:
+- **Count, sum, sum_of_squares** (for mean/std via Welford's algorithm)
+- **Min/max** values
+- **T-Digest sketches** (optional, for approximate percentiles)
+
+## Streaming Workflow
+
+<Steps>
+  <Step title="Initialize State">
+    Process the first batch to create initial state
+  </Step>
+  
+  <Step title="Incremental Updates">
+    Update state with each new data batch
+  </Step>
+  
+  <Step title="Finalize Statistics">
+    Convert accumulated state to final statistics
+  </Step>
+  
+  <Step title="Densify & Export">
+    Generate complete maps with geometries
+  </Step>
+</Steps>
+
+## CLI Examples
+
+### Day 1: Initialize State
+
+Process the first batch of observations:
+
+```bash
+healpyxel_accumulate \
+  --input day001.parquet \
+  --columns r750 r950 \
+  --state-output state/state_v001.parquet
+```
+
+**Output:**
+```
+state/state_v001.parquet          # Serialized accumulator state
+state/state_v001.meta.json        # Metadata (nside, columns, counts)
+```
+
+### Day 2-30: Incremental Updates
+
+Update state with each new batch:
+
+<CodeGroup>
+```bash Day 2
+healpyxel_accumulate \
+  --input day002.parquet \
+  --columns r750 r950 \
+  --state-input state/state_v001.parquet \
+  --state-output state/state_v002.parquet
+```
+
+```bash Day 30
+healpyxel_accumulate \
+  --input day030.parquet \
+  --columns r750 r950 \
+  --state-input state/state_v029.parquet \
+  --state-output state/state_v030.parquet
+```
+
+```bash Automated Loop
+for day in {1..30}; do
+  prev=$((day - 1))
+  healpyxel_accumulate \
+    --input "day$(printf %03d $day).parquet" \
+    --columns r750 r950 \
+    --state-input "state/state_v$(printf %03d $prev).parquet" \
+    --state-output "state/state_v$(printf %03d $day).parquet"
+done
+```
+</CodeGroup>
+
+<Accordion title="Automatic Sidecar Detection">
+If sidecars follow the naming convention, they're auto-detected:
+
+```bash
+# Sidecar naming: {input_stem}.cell-healpix_assignment-{mode}_nside-{nside}.parquet
+day001.parquet
+day001.cell-healpix_assignment-fuzzy_nside-512.parquet  # Auto-detected!
+
+healpyxel_accumulate \
+  --input day001.parquet \
+  --columns r750  # Sidecar found automatically
+```
+
+Manual override:
+```bash
+healpyxel_accumulate \
+  --input day001.parquet \
+  --sidecar custom_sidecar.parquet \
+  --columns r750
+```
+</Accordion>
+
+### Finalize to Statistics
+
+Convert accumulated state to final per-cell statistics:
+
+```bash
+healpyxel_finalize \
+  --state state/state_v030.parquet \
+  --output mosaic_v030.parquet \
+  --percentiles 25 50 75 \
+  --densify \
+  --nside 512
+```
+
+**Output columns:**
+- `{column}_mean`, `{column}_std`
+- `{column}_min`, `{column}_max`
+- `{column}_p25`, `{column}_p50`, `{column}_p75` (if T-Digest enabled)
+- `n_sources` (observation count per cell)
+
+## Python API
+
+### Programmatic Accumulation
+
+<CodeGroup>
+```python Initialization
+from healpyxel import accumulator
+import pandas as pd
+
+# Load first batch
+data_day1 = pd.read_parquet('day001.parquet')
+sidecar = pd.read_parquet('day001_sidecar.parquet')
+
+# Initialize state
+state = accumulator.update_state(
+    batch=data_day1,
+    sidecar=sidecar,
+    value_columns=["r750", "r950"],
+    state=None  # First batch
+)
+
+# Save state
+accumulator.save_state(
+    state, 
+    'state_v001.parquet',
+    metadata={'nside': 512, 'columns': ['r750', 'r950']}
+)
+```
+
+```python Incremental Update
+# Load existing state
+state, meta = accumulator.load_state('state_v001.parquet')
+
+# Process new batch
+data_day2 = pd.read_parquet('day002.parquet')
+sidecar_day2 = pd.read_parquet('day002_sidecar.parquet')
+
+state = accumulator.update_state(
+    batch=data_day2,
+    sidecar=sidecar_day2,
+    value_columns=["r750", "r950"],
+    state=state  # Pass existing state
+)
+
+accumulator.save_state(state, 'state_v002.parquet', meta)
+```
+
+```python Finalization
+from healpyxel import finalize
+
+# Load final state
+state, meta = accumulator.load_state('state_v030.parquet')
+
+# Convert to statistics DataFrame
+final_df = finalize.from_state(
+    state=state,
+    aggs=["mean", "std", "median", "robust_std"],
+)
+
+print(final_df.head())
+# healpix_id | r750_mean | r750_std | r750_median | r750_robust_std | n_sources
+```
+</CodeGroup>
+
+## Data Filtering
+
+Apply quality filters during accumulation without modifying source data:
+
+<CodeGroup>
+```bash CLI Filtering
+healpyxel_accumulate \
+  --input day003.parquet \
+  --columns r750 r950 \
+  --state-input state/state_v002.parquet \
+  --state-output state/state_v003.parquet \
+  --filter "quality > 0.5 and solar_zenith < 80"
+```
+
+```python Python Filtering
+state = accumulator.update_state(
+    batch=data,
+    sidecar=sidecar,
+    value_columns=["r750"],
+    state=state,
+    filter_expr="(emission_angle < 60) & (phase_angle < 90)"
+)
+```
+</CodeGroup>
+
+**Filter syntax:** Standard pandas query expressions
+
+```python
+# Common planetary science filters
+"emission_angle < 60"                    # Viewing geometry
+"quality_flag == 1"                       # Data quality
+"solar_zenith < 85"                       # Illumination
+"(lat > -45) & (lat < 45)"               # Spatial region
+"surface_temp.between(200, 400)"         # Physical constraints
+```
+
+## Percentile Tracking with T-Digest
+
+Enable approximate percentile computation (requires `pip install tdigest`):
+
+```bash
+healpyxel_accumulate \
+  --input day001.parquet \
+  --columns r750 r950 \
+  --state-output state_v001.parquet
+  # T-Digest enabled by default
+
+# Disable if not needed (saves memory):
+healpyxel_accumulate ... --no-tdigest
+```
+
+**Finalize with percentiles:**
+
+```bash
+healpyxel_finalize \
+  --state state_v030.parquet \
+  --output mosaic.parquet \
+  --percentiles 10 25 50 75 90
+```
+
+<Accordion title="T-Digest Accuracy">
+T-Digest provides approximate percentiles with controllable error:
+
+| Percentile | Typical Error | Use Case |
+|------------|---------------|----------|
+| p50 (median) | ±0.5% | Robust central tendency |
+| p25, p75 | ±1% | Interquartile range |
+| p10, p90 | ±2% | Distribution tails |
+
+**Memory usage:** ~1-5 KB per cell per column (compression=100, default)
+
+**When to disable:**
+- Only need mean/std/min/max
+- Memory constrained (billions of cells)
+- Exact percentiles required (use batch workflow instead)
+</Accordion>
+
+## State File Management
+
+### State File Structure
+
+```python
+import pandas as pd
+import json
+
+# Load state file
+state_df = pd.read_parquet('state_v030.parquet')
+
+print(state_df.columns)
+# ['healpix_id', 'stats_json', 'tdigests_json']
+
+# Inspect one cell's statistics
+cell_0 = json.loads(state_df.iloc[0]['stats_json'])
+print(cell_0)
+# {
+#   'r750': {'n': 127, 'sum': 6.35, 'sum_sq': 0.318, 'min': 0.045, 'max': 0.055},
+#   'r950': {'n': 127, 'sum': 7.62, 'sum_sq': 0.458, 'min': 0.052, 'max': 0.068}
+# }
+```
+
+### Version Management
+
+<CodeGroup>
+```bash Sequential Versioning
+# Keep all intermediate states for reproducibility
+state/
+├── state_v001.parquet  # Day 1
+├── state_v002.parquet  # Day 2
+├── state_v003.parquet  # Day 3
+└── state_v030.parquet  # Day 30 (final)
+```
+
+```bash Rolling Checkpoint
+# Keep only latest + checkpoints (space-efficient)
+state/
+├── state_latest.parquet      # Current state
+├── state_checkpoint_week1.parquet
+├── state_checkpoint_week2.parquet
+└── state_checkpoint_week4.parquet
+
+# Update latest:
+healpyxel_accumulate \
+  --state-input state/state_latest.parquet \
+  --state-output state/state_latest.parquet  # Overwrite
+```
+</CodeGroup>
+
+## Performance Considerations
+
+### Memory Usage
+
+State size scales with **number of cells with data** × **number of columns**:
+
+| Configuration | State Size | Notes |
+|---------------|------------|-------|
+| nside=256, 10 columns, 50k cells | ~50 MB | Typical regional study |
+| nside=512, 5 columns, 500k cells | ~200 MB | High-res global mosaic |
+| nside=1024, 20 columns, 5M cells | ~5 GB | Extreme resolution |
+
+<Note>
+  With T-Digest enabled, add ~20-30% to state file size.
+</Note>
+
+### Computation Time
+
+```python
+# Benchmark: MacBook Pro M1, 100k observations/batch
+Day 1 (initialize):  ~15 seconds
+Day 2-30 (update):   ~8 seconds each
+Finalize:            ~5 seconds
+
+Total for 30 batches (3M obs): ~4 minutes
+```
+
+**Speedup vs. batch reprocessing:**
+- Day 2: 10× faster (no reprocessing of day 1)
+- Day 30: 30× faster (no reprocessing of days 1-29)
+
+## Use Cases
+
+### 1. Mission Operations
+
+```bash
+#!/bin/bash
+# Daily update script for ongoing mission
+
+LATEST_BATCH=$(ls -t data/raw/mission_*_${TODAY}.parquet | head -1)
+LATEST_STATE=$(ls -t state/state_v*.parquet | head -1)
+NEXT_VERSION=$(($(basename $LATEST_STATE .parquet | sed 's/state_v//') + 1))
+
+healpyxel_accumulate \
+  --input "$LATEST_BATCH" \
+  --state-input "$LATEST_STATE" \
+  --state-output "state/state_v${NEXT_VERSION}.parquet" \
+  --columns r750 r950 r1050
+
+healpyxel_finalize \
+  --state "state/state_v${NEXT_VERSION}.parquet" \
+  --output "public/latest_mosaic.parquet" \
+  --densify
+```
+
+### 2. Reprocessing with Quality Flags
+
+```bash
+# Initial processing (all data)
+healpyxel_accumulate --input mission_data.parquet \
+  --columns r750 --state-output state_all.parquet
+
+# Reprocess with quality filter (separate state)
+healpyxel_accumulate --input mission_data.parquet \
+  --columns r750 --state-output state_hq.parquet \
+  --filter "quality_flag == 1 and emission_angle < 60"
+
+# Compare statistics
+healpyxel_finalize --state state_all.parquet --output mosaic_all.parquet
+healpyxel_finalize --state state_hq.parquet --output mosaic_hq.parquet
+```
+
+### 3. Multi-Resolution Mosaics
+
+```bash
+# Maintain separate states for different resolutions
+for nside in 128 256 512; do
+  healpyxel_accumulate \
+    --input new_data.parquet \
+    --sidecar "sidecar_nside${nside}.parquet" \
+    --state-input "state/nside${nside}_latest.parquet" \
+    --state-output "state/nside${nside}_latest.parquet" \
+    --columns r1050
+done
+```
+
+## Compatibility with Batch Workflow
+
+Streaming state can be finalized to produce identical output to batch aggregation:
+
+```bash
+# Batch workflow
+healpyxel_aggregate --input data.parquet --sidecar sidecar.parquet \
+  --columns r750 --aggs mean std
+# Output: data-aggregated.parquet (r750_mean, r750_std, n_sources)
+
+# Streaming workflow (equivalent)
+healpyxel_accumulate --input data.parquet --columns r750 \
+  --state-output state.parquet
+healpyxel_finalize --state state.parquet --output data-streaming.parquet
+# Output: data-streaming.parquet (r750_mean, r750_std, n_sources)
+
+# Results are numerically identical (within floating point precision)
+```
+
+## Troubleshooting
+
+<Accordion title="State/Sidecar Compatibility Errors">
+**Error:** `nside mismatch: state=256, sidecar=512`
+
+**Cause:** Trying to update a state file with a sidecar at different resolution.
+
+**Solution:**
+```bash
+# Check state metadata
+cat state_v010.meta.json | jq '.nside'
+# 256
+
+# Use matching sidecar
+healpyxel_accumulate --input data.parquet \
+  --sidecar data.nside-256.parquet \
+  --state-input state_v010.parquet ...
+```
+</Accordion>
+
+<Accordion title="Missing T-Digest Percentiles">
+**Error:** `finalize: percentile columns missing (T-Digest disabled)`
+
+**Solution:** State was accumulated with `--no-tdigest`. Re-accumulate with T-Digest enabled:
+
+```bash
+healpyxel_accumulate --input data.parquet --columns r750 \
+  --state-output state.parquet  # T-Digest enabled by default
+```
+</Accordion>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Batch Processing" icon="layer-group" href="/guides/batch-processing">
+    Learn the standard batch workflow for complete datasets
+  </Card>
+  
+  <Card title="Visualization" icon="chart-line" href="/guides/visualization">
+    Create maps from accumulated state
+  </Card>
+  
+  <Card title="Accumulator API" icon="code" href="/api/accumulator">
+    Programmatic state management
+  </Card>
+  
+  <Card title="Finalize API" icon="gauge-high" href="/api/finalize">
+    Finalize streaming statistics
+  </Card>
+</CardGroup>

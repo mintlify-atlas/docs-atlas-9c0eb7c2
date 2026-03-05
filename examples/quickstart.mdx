@@ -1,0 +1,210 @@
+---
+title: 'Quickstart Example'
+description: 'Complete quickstart guide with end-to-end workflow'
+icon: 'rocket'
+---
+
+This page demonstrates the complete healpyxel workflow from setup to final HEALPix map creation.
+
+## Setup
+
+First, import the necessary packages:
+
+```python
+import healpyxel
+from healpyxel import core
+import pandas as pd
+import numpy as np
+
+print(f"healpyxel version: {healpyxel.__version__}")
+```
+
+## Core Utilities
+
+### Validate HEALPix Parameters
+
+```python
+# Validate nside parameter
+try:
+    core.validate_nside(64)  # Valid power of 2
+    print("✓ nside=64 is valid")
+except ValueError as e:
+    print(f"✗ {e}")
+
+try:
+    core.validate_nside(100)  # Invalid
+except ValueError as e:
+    print(f"✓ Caught invalid nside: {e}")
+```
+
+### Robust Statistics
+
+```python
+# Test MAD (Median Absolute Deviation)
+data = np.array([1, 2, 3, 4, 5, 100])  # Outlier at 100
+mad_value = core.mad(data)
+print(f"MAD of {data}: {mad_value:.2f}")
+
+# Test robust standard deviation
+robust_std = core.robust_std(data)
+normal_std = np.std(data)
+print(f"Robust std: {robust_std:.2f}")
+print(f"Normal std: {normal_std:.2f}")
+print(f"Robust std is less affected by the outlier (100)")
+```
+
+## Working with Sample Data
+
+### Load Test Data
+
+```python
+from pathlib import Path
+
+# Look for test data
+test_data_dir = Path('../test_data')
+sample_file = test_data_dir / 'samples/sample_50k.parquet'
+
+if sample_file.exists():
+    print(f"Loading sample: {sample_file.name}")
+    df = pd.read_parquet(sample_file)
+    
+    print(f"\nShape: {df.shape}")
+    print(f"\nColumns: {list(df.columns)}")
+    print(f"\nFirst few rows:")
+    display(df.head())
+else:
+    print("Sample data not found. Run create_test_data.sh to generate test data.")
+```
+
+## CLI Workflow Example
+
+Below is a complete bash script for processing sample data using the CLI tools:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+INPUT="$ROOT_DIR/test_data/samples/sample_50k.parquet"
+OUT_DIR="$ROOT_DIR/test_data/derived/cli_quickstart"
+NSIDE=32
+MODE=fuzzy
+LON_CONVENTION=0_360
+
+mkdir -p "$OUT_DIR"
+
+# 1) Create HEALPix sidecar
+healpix_sidecar \
+  --input "$INPUT" \
+  --nside "$NSIDE" \
+  --mode "$MODE" \
+  --lon-convention "$LON_CONVENTION" \
+  --output_dir "$OUT_DIR"
+
+# 2) Aggregate (densified) regridded map
+healpix_aggregate \
+  --input "$INPUT" \
+  --sidecar-dir "$OUT_DIR" \
+  --sidecar-index 0 \
+  --aggregate \
+  --columns r1050 \
+  --aggs mean median std mad robust_std \
+  --min-count 1 \
+  --densify \
+  --output "$OUT_DIR/sample_50k_nside${NSIDE}_r1050_aggregate.parquet"
+```
+
+<Note>
+Save this as `examples/cli_regrid_sample_50k.sh` and run it from the repo root.
+</Note>
+
+## Python API Workflow
+
+### Create Sidecar with HEALPix Assignments
+
+```python
+from healpyxel.sidecar import process_partition
+import geopandas as gpd
+from shapely import wkb
+
+# Convert WKB geometry to GeoDataFrame
+if 'geometry' in df.columns:
+    df['geometry'] = df['geometry'].apply(
+        lambda x: wkb.loads(bytes(x)) if x is not None else None
+    )
+    gdf = gpd.GeoDataFrame(df, geometry='geometry', crs='EPSG:4326')
+
+# Parameters
+nside = 32  # HEALPix resolution
+mode = 'fuzzy'  # 'fuzzy' allows multiple cells per geometry
+
+# Process the GeoDataFrame
+sidecar_df = process_partition(
+    gdf=gdf,
+    nside=nside,
+    mode=mode,
+    base_index=0,
+    lon_convention='0_360'
+)
+
+print(f"Created sidecar with {len(sidecar_df)} assignments")
+print(f"Unique geometries: {sidecar_df['source_id'].nunique()}")
+print(f"Unique HEALPix cells: {sidecar_df['healpix_id'].nunique()}")
+```
+
+### Aggregate Data by HEALPix Cells
+
+```python
+from healpyxel.aggregate import aggregate_by_sidecar
+
+# Convert GeoDataFrame to regular DataFrame (geometry not needed)
+df_for_agg = gdf.drop(columns=['geometry'])
+df_for_agg['source_id'] = df_for_agg.index.astype(np.int64)
+
+# Aggregate r1050 column by HEALPix cells
+aggregated = aggregate_by_sidecar(
+    original=df_for_agg,
+    sidecar=sidecar_df,
+    value_columns=['r1050'],
+    aggs=['mean', 'median', 'std', 'mad', 'robust_std'],
+    source_id_col='source_id',
+    healpix_col='healpix_id',
+    min_count=1,
+    sentinel_threshold=1e30
+)
+
+print(f"\nAggregated {len(aggregated)} HEALPix cells")
+print(f"Columns: {list(aggregated.columns)}")
+```
+
+## Verify Sidecar Output Naming
+
+```python
+from healpyxel.sidecar import build_output_path
+
+assert build_output_path(
+    Path("sample_50k.parquet"),
+    mode="fuzzy",
+    nside=32,
+).name == "sample_50k.cell-healpix_assignment-fuzzy_nside-32_order-nested.parquet"
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Streaming Accumulation" icon="stream" href="/examples/accumulation">
+    Learn how to process large datasets with online statistics
+  </Card>
+  
+  <Card title="Visualization Workflow" icon="chart-area" href="/examples/visualization-workflow">
+    Create production-ready HEALPix maps with advanced projections
+  </Card>
+  
+  <Card title="API Reference" icon="code" href="/api/sidecar">
+    Explore the complete Python API
+  </Card>
+  
+  <Card title="CLI Tools" icon="terminal" href="/cli/overview">
+    Master the command-line interface
+  </Card>
+</CardGroup>

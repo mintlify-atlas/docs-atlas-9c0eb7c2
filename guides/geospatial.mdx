@@ -1,0 +1,541 @@
+---
+title: 'GeoParquet Integration'
+description: 'Work with HEALPix data in GIS software and geospatial workflows'
+---
+
+## Overview
+
+HEALPyxel seamlessly integrates with modern geospatial tools through **GeoParquet**, the cloud-native format for geospatial data. You can:
+
+- Import HEALPix cells directly into QGIS, ArcGIS, or GIS Python libraries
+- Cache HEALPix grid geometries for fast repeated use
+- Handle antimeridian-crossing cells correctly
+- Export to GeoTIFF for raster-based GIS workflows
+- Validate geometries for spherical projections
+
+## GeoParquet Workflow
+
+<Steps>
+  <Step title="Generate Aggregated Data">
+    Use `healpyxel_aggregate` to create per-cell statistics
+  </Step>
+  
+  <Step title="Attach Geometries">
+    Convert to GeoParquet with `healpyxel_to_geoparquet`
+  </Step>
+  
+  <Step title="Import to GIS">
+    Open `.geo.parquet` files in QGIS, ArcGIS, or Python
+  </Step>
+</Steps>
+
+## Converting Aggregated Data to GeoParquet
+
+### CLI Usage
+
+<CodeGroup>
+```bash Single File
+healpyxel_to_geoparquet \
+  --aggregate-path observations-aggregated.parquet \
+  --output-dir output/ \
+  --lon-convention -180_180
+```
+
+```bash Batch Processing
+# Convert all aggregated files in a directory
+for f in output/*-aggregated*.parquet; do
+  healpyxel_to_geoparquet \
+    --aggregate-path "$f" \
+    --output-dir output/ \
+    --lon-convention -180_180 \
+    --force  # Overwrite existing
+done
+```
+
+```bash Auto-Detect Parameters
+# Automatically extract nside, order from metadata
+healpyxel_to_geoparquet \
+  --aggregate-path observations-aggregated.nside-64.parquet \
+  --output-dir output/
+  # Reads nside=64, order=nested from .meta.json sidecar
+```
+</CodeGroup>
+
+**Key Parameters:**
+
+| Parameter | Description | Default |
+|-----------|-------------|-------|
+| `--aggregate-path` | Input aggregated parquet file | Required |
+| `--output-dir` | Output directory | Same as input |
+| `--lon-convention` | `0_360` or `-180_180` | `0_360` |
+| `--force` | Overwrite existing files | False |
+| `--fix-antimeridian` | Fix cells crossing date line | True |
+
+<Accordion title="Longitude Convention Selection">
+**When to use `-180_180`:**
+- QGIS/ArcGIS (expects [-180, 180] range)
+- Web mapping (Leaflet, Mapbox)
+- Most Earth-centric tools
+
+**When to use `0_360`:**
+- Planetary science conventions
+- Cross-meridian features (reduces split polygons)
+- Custom projections centered at 180°
+
+**Note:** Geometries are **automatically converted** during export. Choice only affects polygon coordinates, not the underlying HEALPix cell IDs.
+</Accordion>
+
+### Python API
+
+```python
+from healpyxel.geospatial import healpix_to_geodataframe
+import pandas as pd
+
+# Load aggregated data
+agg_df = pd.read_parquet('observations-aggregated.parquet')
+
+# Generate HEALPix cell geometries
+cells_gdf = healpix_to_geodataframe(
+    nside=64,
+    order='nested',
+    lon_convention='0_360',
+    pixels=agg_df['healpix_id'].to_numpy(),  # Only needed cells
+    fix_antimeridian=True,
+    cache_mode='use'  # Use cache if available
+).reset_index(drop=False)
+
+# Merge with aggregated statistics
+geo_gdf = cells_gdf.merge(agg_df, on='healpix_id', how='left')
+
+# Save as GeoParquet
+geo_gdf.to_parquet('observations-aggregated.geo.parquet')
+print(f"✓ Saved {len(geo_gdf)} cells to GeoParquet")
+```
+
+## HEALPix Grid Caching
+
+Pre-compute and cache HEALPix cell boundaries for faster repeated use.
+
+### Why Cache?
+
+- **Speed:** Computing HEALPix boundaries is expensive for high nside
+- **Reusability:** Same grids used across multiple datasets
+- **Consistency:** Ensures identical geometries across analyses
+
+<Note>
+  Cache files use **spherical coordinates** (theta, phi) and are converted to lon/lat on-the-fly during GeoDataFrame generation.
+</Note>
+
+### CLI Cache Management
+
+<CodeGroup>
+```bash Generate Cache
+# Create cache for multiple resolutions
+healpyxel_cache --nside 8 16 32 64 128 --order nested --lon-convention 0_360
+```
+
+```bash List Cached Grids
+healpyxel_cache --list
+
+# Output:
+# Cache directory: ~/.cache/healpyxel/healpix_grids
+# Cached grids (5):
+#   nside_008_nest_spherical.parquet     768 cells    0.0 MB
+#   nside_016_nest_spherical.parquet    3072 cells    0.1 MB
+#   nside_032_nest_spherical.parquet   12288 cells    0.2 MB
+#   nside_064_nest_spherical.parquet   49152 cells    0.9 MB
+#   nside_128_nest_spherical.parquet  196608 cells    3.5 MB
+```
+
+```bash Verify Cache Integrity
+healpyxel_cache --verify --nside 64 128
+
+# Checks:
+# - All npix cells present
+# - No NaN values in coordinates
+# - healpix_id in valid range [0, npix)
+```
+
+```bash Clean Cache
+healpyxel_cache --clean
+# Removes all cached grid files
+```
+</CodeGroup>
+
+### Cache Configuration
+
+Cache location follows **XDG Base Directory Specification**:
+
+**Precedence (highest to lowest):**
+1. CLI argument: `--cache-dir /custom/path`
+2. Environment variable: `HEALPYXEL_CACHE=/custom/path`
+3. XDG spec: `$XDG_CACHE_HOME/healpyxel/healpix_grids`
+4. Fallback: `~/.cache/healpyxel/healpix_grids`
+
+<CodeGroup>
+```bash Environment Variable
+export HEALPYXEL_CACHE=/mnt/fast_ssd/healpyxel
+healpyxel_cache --nside 256  # Uses /mnt/fast_ssd/healpyxel
+```
+
+```bash CLI Override
+healpyxel_cache --nside 256 --cache-dir /tmp/healpyxel_cache
+```
+
+```python Python API
+from healpyxel.geospatial import healpix_to_geodataframe
+from pathlib import Path
+
+gdf = healpix_to_geodataframe(
+    nside=64,
+    cache_mode='use',
+    cache_dir=Path('/custom/cache')  # Override default
+)
+```
+</CodeGroup>
+
+### Cache Modes
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `use` | Use cache if available, compute otherwise | Default, fast + flexible |
+| `require` | Require cache, error if missing | Production pipelines |
+| `off` | Ignore cache entirely | Testing, one-off analyses |
+
+```python
+# Production pipeline (require cache)
+gdf = healpix_to_geodataframe(
+    nside=512, 
+    cache_mode='require'  # Fail if cache missing
+)
+
+# Exploratory analysis (always fresh)
+gdf = healpix_to_geodataframe(
+    nside=64, 
+    cache_mode='off'  # Ignore cache
+)
+```
+
+## Working with GeoParquet in GIS Software
+
+### QGIS (Recommended)
+
+<Steps>
+  <Step title="Import GeoParquet">
+    1. **Drag and drop** `.geo.parquet` file into QGIS map canvas
+    2. Or: **Layer** → **Add Layer** → **Add Vector Layer** → Select `.geo.parquet`
+  </Step>
+  
+  <Step title="Style the Layer">
+    1. Right-click layer → **Properties** → **Symbology**
+    2. Choose **Graduated** renderer
+    3. Select value column (e.g., `r1050_median`)
+    4. Choose **Color ramp** (e.g., Spectral, inverted)
+    5. Set **Mode**: Natural Breaks (Jenks) or Quantile
+    6. Set **Classes**: 10-20 for smooth gradients
+    7. Click **Classify**, then **OK**
+  </Step>
+  
+  <Step title="Add Context">
+    - **Basemap:** QuickMapServices plugin → NASA GIBS (planetary)
+    - **Graticule:** Processing Toolbox → "Create grid"
+    - **Labels:** Layer Properties → Labels → Single labels (healpix_id)
+  </Step>
+  
+  <Step title="Export Map">
+    - **Project** → **Import/Export** → **Export Map to Image**
+    - Choose resolution (e.g., 300 DPI for publication)
+    - Save as PNG, JPEG, or PDF
+  </Step>
+</Steps>
+
+### ArcGIS Pro
+
+1. **Import:** Right-click on map → **Add Data** → Select `.geo.parquet`
+2. **Symbology:** Right-click layer → **Symbology** → **Graduated Colors**
+3. **Field:** Choose value column (e.g., `r1050_median`)
+4. **Color scheme:** Choose ramp (Spectral, inverted)
+5. **Method:** Natural Breaks (Jenks)
+6. **Classes:** 10-20
+7. **Export:** Share → Export Map (PNG, PDF, TIFF)
+
+### Python (GeoPandas)
+
+```python
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+
+# Load GeoParquet
+gdf = gpd.read_parquet('observations-aggregated.geo.parquet')
+
+print(f"Loaded {len(gdf)} HEALPix cells")
+print(f"Columns: {gdf.columns.tolist()}")
+print(f"CRS: {gdf.crs}")
+
+# Quick plot
+fig, ax = plt.subplots(figsize=(12, 8))
+gdf.plot(
+    column='r1050_median',
+    cmap='Spectral_r',
+    legend=True,
+    ax=ax,
+    edgecolor='none',
+    legend_kwds={'label': 'Reflectance at 1050 nm', 'shrink': 0.8}
+)
+ax.set_title('Mercury Surface Reflectance', fontsize=14)
+plt.tight_layout()
+plt.savefig('geopandas_map.png', dpi=200, bbox_inches='tight')
+plt.show()
+```
+
+### R (sf package)
+
+```r
+library(sf)
+library(ggplot2)
+
+# Read GeoParquet
+gdf <- st_read("observations-aggregated.geo.parquet")
+
+print(paste("Loaded", nrow(gdf), "cells"))
+print(colnames(gdf))
+
+# Plot with ggplot2
+ggplot(gdf) +
+  geom_sf(aes(fill = r1050_median), color = NA) +
+  scale_fill_distiller(palette = "Spectral", direction = 1,
+                       name = "Reflectance\nat 1050 nm") +
+  theme_minimal() +
+  ggtitle("Mercury Surface Reflectance Map")
+
+ggsave("r_map.png", width = 12, height = 8, dpi = 300)
+```
+
+## Antimeridian Handling
+
+HEALPix cells near the dateline (longitude ±180°) can cross the antimeridian, causing rendering issues.
+
+### Problem
+
+```python
+# Without antimeridian fixing:
+# Cell corners: [179.5, 180.2, 180.1, 179.8]
+# → Renders as horizontal line crossing the map!
+```
+
+### Solution
+
+HEALPyxel uses the `antimeridian` package to split polygons:
+
+```python
+from healpyxel.geospatial import healpix_to_geodataframe
+
+# Automatic fixing (default)
+gdf = healpix_to_geodataframe(
+    nside=64,
+    fix_antimeridian=True  # Splits crossing cells into MultiPolygons
+)
+
+# Check for split cells
+split_cells = gdf[gdf.geometry.type == 'MultiPolygon']
+print(f"Split cells: {len(split_cells)} / {len(gdf)}")
+```
+
+**Result:**
+- Single cells crossing ±180° → MultiPolygon with two parts
+- Correctly rendered in all projections
+- No horizontal "stripes" across maps
+
+<Accordion title="Manual Antimeridian Fixing">
+If you encounter rendering issues:
+
+```python
+import geopandas as gpd
+import antimeridian
+
+# Load GeoParquet
+gdf = gpd.read_parquet('data.geo.parquet')
+
+# Fix antimeridian-crossing geometries
+gdf['geometry'] = gdf['geometry'].apply(
+    lambda geom: antimeridian.fix_polygon(geom) 
+                 if geom.geom_type == 'Polygon' 
+                 else geom
+)
+
+# Save fixed version
+gdf.to_parquet('data_fixed.geo.parquet')
+```
+</Accordion>
+
+## Exporting to GeoTIFF
+
+Convert HEALPix cells to regular raster grid for raster GIS workflows:
+
+```python
+from healpyxel.geospatial import export_healpix_to_geotiff
+import pandas as pd
+
+# Load aggregated data
+agg_df = pd.read_parquet('observations-aggregated.parquet')
+
+# Export to GeoTIFF
+export_healpix_to_geotiff(
+    df=agg_df,
+    column='r1050_median',
+    output_path='mercury_reflectance.tif',
+    nside=64,
+    order='nested',
+    crs='IAU:19900',  # Mercury IAU CRS (or EPSG:4326 for generic)
+    width=1440,       # 0.25° resolution
+    height=720
+)
+
+print("✓ Exported to GeoTIFF: mercury_reflectance.tif")
+```
+
+**CRS Options:**
+
+| Body | CRS Code | Notes |
+|------|----------|-------|
+| Mercury | `IAU:19900` | IAU 2015 reference |
+| Moon | `IAU:30100` | Lunar coordinate system |
+| Mars | `IAU:49900` | Mars 2000 |
+| Generic | `EPSG:4326` | WGS84 (Earth), works for most cases |
+
+## Geometry Validation
+
+Ensure geometries are valid for spherical projections:
+
+```python
+from healpyxel.geospatial import is_geometry_valid
+from shapely.geometry import Polygon
+
+# Valid geometry
+valid_poly = Polygon([(-180, -90), (-180, 90), (180, 90), (180, -90), (-180, -90)])
+print(is_geometry_valid(valid_poly))  # True
+
+# Invalid geometry (coordinates out of bounds)
+invalid_poly = Polygon([(1e32, 1e32), (180, 90), (180, -90), (1e32, 1e32)])
+print(is_geometry_valid(invalid_poly))  # False
+
+# Check GeoDataFrame
+import geopandas as gpd
+
+gdf = gpd.read_parquet('data.geo.parquet')
+gdf['is_valid'] = gdf['geometry'].apply(is_geometry_valid)
+
+if not gdf['is_valid'].all():
+    print(f"⚠ {(~gdf['is_valid']).sum()} invalid geometries found")
+    # Fix invalid geometries
+    gdf = gdf[gdf['is_valid']].copy()
+```
+
+## Performance Tips
+
+### Large GeoParquet Files
+
+<Accordion title="Handling > 1 GB GeoParquet Files">
+**Problem:** Full GeoParquet load into memory fails.
+
+**Solutions:**
+
+1. **Spatial filtering (GeoParquet-native):**
+   ```python
+   import geopandas as gpd
+   from shapely.geometry import box
+   
+   # Only load cells in bounding box
+   bbox = box(-45, -10, 45, 10)  # Equatorial region
+   gdf = gpd.read_parquet(
+       'large.geo.parquet',
+       bbox=bbox  # Spatial filter during read
+   )
+   ```
+
+2. **Column filtering:**
+   ```python
+   gdf = gpd.read_parquet(
+       'large.geo.parquet',
+       columns=['healpix_id', 'geometry', 'r1050_median']  # Only needed columns
+   )
+   ```
+
+3. **Dask-GeoPandas (parallel/streaming):**
+   ```python
+   import dask_geopandas as dgpd
+   
+   dgdf = dgpd.read_parquet('large.geo.parquet')
+   
+   # Filter in parallel
+   filtered = dgdf[dgdf['r1050_median'] > 0.05].compute()
+   ```
+</Accordion>
+
+### Cache Optimization
+
+```bash
+# Pre-generate caches for common resolutions
+healpyxel_cache --nside 32 64 128 256 512 --order nested
+
+# Verify integrity before production runs
+healpyxel_cache --verify --nside 512
+
+# Use fast storage for cache
+export HEALPYXEL_CACHE=/mnt/nvme_ssd/healpyxel_cache
+```
+
+## Complete GeoParquet Pipeline
+
+```bash
+#!/bin/bash
+# End-to-end: Aggregation → GeoParquet → QGIS visualization
+
+INPUT="observations.parquet"
+OUTPUT_DIR="output"
+NSIDE=64
+
+# 1. Generate sidecar
+healpyxel_sidecar --input "$INPUT" --nside $NSIDE --mode fuzzy --output-dir "$OUTPUT_DIR"
+
+# 2. Aggregate
+healpyxel_aggregate \
+  --input "$INPUT" \
+  --sidecar-dir "$OUTPUT_DIR" \
+  --sidecar-index 0 \
+  --aggregate \
+  --columns r1050 \
+  --aggs median robust_std \
+  --densify
+
+# 3. Convert to GeoParquet
+healpyxel_to_geoparquet \
+  --aggregate-path "$OUTPUT_DIR"/*-aggregated-densified*.parquet \
+  --output-dir "$OUTPUT_DIR" \
+  --lon-convention -180_180 \
+  --force
+
+echo "✓ Pipeline complete!"
+echo "  Open in QGIS: $OUTPUT_DIR/*.geo.parquet"
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Visualization Workflows" icon="chart-area" href="/guides/visualization">
+    Create maps from GeoParquet data
+  </Card>
+  
+  <Card title="Batch Processing" icon="layer-group" href="/guides/batch-processing">
+    Generate aggregated data for GeoParquet conversion
+  </Card>
+  
+  <Card title="Geospatial API" icon="code" href="/api/geospatial">
+    Complete function reference
+  </Card>
+  
+  <Card title="CLI Reference" icon="map" href="/cli/to-geoparquet">
+    GeoParquet conversion CLI
+  </Card>
+</CardGroup>

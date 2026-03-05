@@ -1,0 +1,388 @@
+---
+title: 'Sidecar Pattern'
+description: 'Non-destructive indexing for spatial data using lightweight companion files'
+---
+
+## What is the Sidecar Pattern?
+
+The **sidecar pattern** is a data engineering strategy where spatial indexing information is stored in a separate, lightweight file alongside the original data—rather than modifying or duplicating the source dataset.
+
+<CardGroup cols={2}>
+  <Card title="Original Data" icon="database">
+    - Heavy: Multi-GB GeoParquet files
+    - Untouched: Never modified
+    - Contains: Full observations with geometries and measurements
+  </Card>
+  <Card title="Sidecar File" icon="file">
+    - Lightweight: ~1% of original size
+    - Disposable: Can be regenerated
+    - Contains: `source_id` → `healpix_id` mapping only
+  </Card>
+</CardGroup>
+
+## Why Use Sidecars?
+
+### Problem: Traditional Spatial Indexing
+
+Traditional approaches require either:
+
+1. **In-place modification**: Add HEALPix column to original file (destructive, slow)
+2. **Full duplication**: Copy entire dataset with new index (storage waste)
+3. **Database import**: Load into PostGIS/SpatiaLite (complex infrastructure)
+
+### Solution: Sidecar Files
+
+HEALPyxel's sidecar approach:
+
+```
+original_data.parquet          ← 2.5 GB (unchanged)
+original_data.sidecar.parquet  ← 25 MB (index only)
+```
+
+<Note>
+  **Key Insight:** Spatial index and data values are **orthogonal concerns**. Separating them enables flexible aggregation without re-processing.
+</Note>
+
+## Sidecar File Structure
+
+A sidecar file contains exactly three columns:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `source_id` | int64 | Index into original dataset (row number) |
+| `healpix_id` | uint64 | HEALPix cell ID (nested ordering) |
+| `weight` | float64 | Assignment weight (1.0 for strict mode, fractional for fuzzy) |
+
+### Example Sidecar Data
+
+```python
+import pandas as pd
+
+# Load sidecar
+sidecar = pd.read_parquet('observations.cell-healpix_assignment-fuzzy_nside-64_order-nested.parquet')
+print(sidecar.head())
+
+#    source_id  healpix_id  weight
+# 0          0        7943     1.0
+# 1          1        8287     1.0
+# 2          2        5819     1.0
+# 3          3       11685     1.0
+# 4          4        3618     1.0
+
+print(f"Unique sources: {sidecar['source_id'].nunique()}")        # 49,988
+print(f"Unique cells: {sidecar['healpix_id'].nunique()}")          # 10,860
+print(f"Total assignments: {len(sidecar)}")                        # 54,931
+```
+
+<Tip>
+  **Fuzzy mode** can assign one observation to multiple cells (when footprint spans boundaries), resulting in more total assignments than sources.
+</Tip>
+
+## Sidecar Metadata
+
+Each sidecar file has a companion `.meta.json` file containing processing provenance:
+
+```json
+{
+  "processing": {
+    "stage": "sidecar",
+    "timestamp": "2024-03-15T10:30:45Z",
+    "source_file": "/path/to/observations.parquet",
+    "output_file": "/path/to/observations-sidecar.parquet"
+  },
+  "healpix": {
+    "nside": 64,
+    "mode": "fuzzy",
+    "order": "nested",
+    "npix": 49152
+  },
+  "coordinates": {
+    "lon_convention": "0_360",
+    "lon_range": [0, 360],
+    "lat_range": [-90, 90]
+  },
+  "processing_params": {
+    "ncores": 8,
+    "coalesced": true
+  }
+}
+```
+
+<Note>
+  Metadata ensures reproducibility: you can verify sidecar parameters and trace back to source data even years later.
+</Note>
+
+## Generating Sidecars
+
+### Using CLI
+
+```bash
+healpyxel_sidecar \
+  --input observations.parquet \
+  --nside 64 128 256 \
+  --mode fuzzy \
+  --lon-convention 0_360 \
+  --output-dir sidecars/ \
+  --ncores 8
+```
+
+**Output:**
+```
+sidecars/
+├── observations.cell-healpix_assignment-fuzzy_nside-64_order-nested.parquet
+├── observations.cell-healpix_assignment-fuzzy_nside-64_order-nested.meta.json
+├── observations.cell-healpix_assignment-fuzzy_nside-128_order-nested.parquet
+├── observations.cell-healpix_assignment-fuzzy_nside-128_order-nested.meta.json
+├── observations.cell-healpix_assignment-fuzzy_nside-256_order-nested.parquet
+└── observations.cell-healpix_assignment-fuzzy_nside-256_order-nested.meta.json
+```
+
+### Using Python API
+
+```python
+from healpyxel.sidecar import generate
+import geopandas as gpd
+
+# Load spatial data
+gdf = gpd.read_parquet('observations.parquet')
+
+# Generate sidecar for single nside
+sidecar_df = generate(
+    gdf,
+    nside=64,
+    mode='fuzzy',
+    order='nested',
+    lon_convention='0_360'
+)
+
+# Save to parquet
+sidecar_df.to_parquet('observations-sidecar-64.parquet', index=False)
+```
+
+## Assignment Modes: Strict vs Fuzzy
+
+### Strict Mode
+
+<Card title="Strict Mode" icon="crosshairs">
+  Assigns observation only if geometry is **fully contained** within a single HEALPix cell.
+  
+  **Use for:** Point observations, high-precision instruments
+  
+  **Result:** One-to-one mapping (one source_id → one healpix_id)
+</Card>
+
+```python
+# Strict mode implementation (from sidecar.py:662-682)
+if mode == "strict":
+    if unique.size == 1:  # Geometry fully in one cell
+        weight = 1.0
+        out_rows.append({
+            "source_id": int(src_id),
+            "healpix_id": int(unique[0]),
+            "weight": weight
+        })
+    # else: dropped (spans multiple cells)
+```
+
+### Fuzzy Mode
+
+<Card title="Fuzzy Mode" icon="wave-square">
+  Assigns observation to **all** HEALPix cells it touches.
+  
+  **Use for:** Polygons, instrument footprints, spatial tracks
+  
+  **Result:** One-to-many mapping (one source_id → multiple healpix_ids)
+</Card>
+
+```python
+# Fuzzy mode implementation (from sidecar.py:684-701)
+else:  # fuzzy mode
+    for hid in unique:  # All touched cells
+        weight = 1.0
+        out_rows.append({
+            "source_id": int(src_id),
+            "healpix_id": int(hid),
+            "weight": weight
+        })
+```
+
+### Visual Comparison
+
+```
+Strict Mode:             Fuzzy Mode:
+┌─────┬─────┐            ┌─────┬─────┐
+│  1  │  2  │            │  1✓ │  2✓ │
+├─────┼─────┤            ├─────┼─────┤
+│  3  │  4  │            │  3✓ │  4✓ │
+└─────┴─────┘            └─────┴─────┘
+    ●                        ╔═══╗
+  (point)                    ║FOV║ (footprint)
+  → cell 3                   ╚═══╝
+                             → cells 1,2,3,4
+```
+
+<Tip>
+  **Recommendation:** Use **fuzzy mode** for most planetary science workflows to avoid losing data at cell boundaries.
+</Tip>
+
+## Using Sidecars for Aggregation
+
+Sidecars enable **decoupled aggregation**: compute statistics on any column without re-generating the spatial index.
+
+### Example Workflow
+
+```python
+import pandas as pd
+from healpyxel.aggregate import by_sidecar
+
+# 1. Load data once
+obs_df = pd.read_parquet('observations.parquet')
+sidecar_df = pd.read_parquet('observations-sidecar-64.parquet')
+
+# 2. Aggregate reflectance bands
+refl_agg = by_sidecar(
+    original=obs_df,
+    sidecar=sidecar_df,
+    value_columns=['r750', 'r950', 'r1050'],
+    aggs=['median', 'robust_std']
+)
+
+# 3. Aggregate temperature (reuse same sidecar!)
+temp_agg = by_sidecar(
+    original=obs_df,
+    sidecar=sidecar_df,
+    value_columns=['surface_temp'],
+    aggs=['mean', 'std']
+)
+```
+
+<Note>
+  **Efficiency:** Sidecar is loaded once and reused for multiple aggregations. No need to recompute spatial index.
+</Note>
+
+## Coordinate Conventions
+
+Sidecars store longitude convention in metadata to prevent coordinate system confusion:
+
+### 0_360 Convention
+
+```python
+# Longitude: [0, 360)
+# Latitude:  [-90, 90]
+sidecar = generate(gdf, nside=64, lon_convention='0_360')
+```
+
+**Use for:** Most planetary data (default for NASA/PDS)
+
+### minus_plus180 Convention
+
+```python
+# Longitude: [-180, 180)
+# Latitude:  [-90, 90]
+sidecar = generate(gdf, nside=64, lon_convention='minus_plus180')
+```
+
+**Use for:** Earth-based GIS, European data standards
+
+<Tip>
+  HEALPyxel automatically validates and filters coordinates during sidecar generation. Out-of-bounds values are logged and dropped.
+</Tip>
+
+## Performance Characteristics
+
+### Sidecar Generation
+
+| Dataset Size | nside=64 | nside=128 | nside=256 |
+|--------------|----------|-----------|----------|
+| 50k rows     | 2 sec    | 3 sec     | 5 sec    |
+| 1M rows      | 30 sec   | 45 sec    | 75 sec   |
+| 10M rows     | 5 min    | 8 min     | 15 min   |
+
+<Note>
+  Times are approximate for fuzzy mode on 8-core CPU. Strict mode is faster. Use `--ncores` to parallelize.
+</Note>
+
+### Sidecar File Sizes
+
+```python
+# Typical compression ratios
+original_size = 2.5 * 1024**3  # 2.5 GB
+sidecar_size = 25 * 1024**2     # 25 MB
+ratio = sidecar_size / original_size
+print(f"Sidecar is {ratio:.1%} of original")  # ~1%
+```
+
+## Multiple Resolutions
+
+Generate sidecars at multiple nside values for multi-resolution analysis:
+
+```bash
+healpyxel_sidecar \
+  --input observations.parquet \
+  --nside 32 64 128 256 \
+  --mode fuzzy
+```
+
+**Output:** 4 sidecar files (one per nside)
+
+```python
+# Aggregate at different resolutions
+for nside in [32, 64, 128, 256]:
+    sidecar = pd.read_parquet(f'sidecar-{nside}.parquet')
+    agg = by_sidecar(obs_df, sidecar, value_columns=['value'], aggs=['median'])
+    print(f"nside={nside}: {len(agg)} cells with data")
+
+# Output:
+# nside=32: 10,860 cells
+# nside=64: 43,210 cells
+# nside=128: 172,450 cells
+# nside=256: 687,321 cells
+```
+
+<Tip>
+  Start with low nside (32-64) for exploration, then increase resolution once you've validated your workflow.
+</Tip>
+
+## Sidecar Validation
+
+Verify sidecar integrity before aggregation:
+
+```python
+import pandas as pd
+import healpy as hp
+
+sidecar = pd.read_parquet('observations-sidecar.parquet')
+
+# 1. Check required columns
+assert 'source_id' in sidecar.columns
+assert 'healpix_id' in sidecar.columns
+
+# 2. Validate HEALPix IDs
+nside = 64
+max_id = hp.nside2npix(nside) - 1
+assert sidecar['healpix_id'].max() <= max_id
+assert sidecar['healpix_id'].min() >= 0
+
+# 3. Check for duplicates (strict mode only)
+if mode == 'strict':
+    assert not sidecar['source_id'].duplicated().any()
+
+print("✓ Sidecar validation passed")
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="HEALPix Grid" icon="grid-2" href="/concepts/healpix">
+    Learn about HEALPix resolution and cell sizes
+  </Card>
+  <Card title="Workflow" icon="diagram-project" href="/concepts/workflow">
+    Understand the full Split-Apply-Combine pattern
+  </Card>
+  <Card title="CLI Reference" icon="terminal" href="/cli/sidecar">
+    Complete sidecar command-line reference
+  </Card>
+  <Card title="API Docs" icon="code" href="/api/sidecar">
+    Python API for sidecar generation
+  </Card>
+</CardGroup>
